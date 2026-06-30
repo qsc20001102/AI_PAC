@@ -72,7 +72,7 @@ function metricCard(rec) {
     .filter((item) => item.sample_time)
     .sort((a, b) => new Date(b.sample_time) - new Date(a.sample_time))[0];
   const time = latest?.source === "manual" ? "手动" : dateSecond(latest?.sample_time || rec.recommend_time);
-  const predictedTp = rec.tp_forecast?.predicted_tp_out ?? rec.tp_forecast?.predictions?.["60"];
+  const predictedTp = rec.tp_forecast?.predicted_tp_out;
   return `
     <article class="panel metric-card ${rec.dosing_point_id === state.selectedPointId ? "selected" : ""}" data-point-id="${rec.dosing_point_id}">
       <div class="card-top">
@@ -114,11 +114,8 @@ function explainBlock(rec) {
 
 function tpForecastText(forecast) {
   if (!forecast) return "";
-  if (forecast.predictions) {
-    return `预测出水TP：30min ${fmtCompact(forecast.predictions["30"], 4)} mg/L，60min ${fmtCompact(forecast.predictions["60"], 4)} mg/L，120min ${fmtCompact(forecast.predictions["120"], 4)} mg/L`;
-  }
   if (forecast.predicted_tp_out == null) return "";
-  return `预测 ${forecast.horizon_minutes} min 后出水TP：${fmtCompact(forecast.predicted_tp_out, 4)} mg/L`;
+  return `预测下一次出水TP检测数据：${fmtCompact(forecast.predicted_tp_out, 4)} mg/L`;
 }
 
 function overviewQualityScope() {

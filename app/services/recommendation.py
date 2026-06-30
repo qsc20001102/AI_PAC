@@ -282,79 +282,47 @@ def tp_forecast_for_point(con: sqlite3.Connection, dosing_point_id: int, data: d
     if not model:
         return None
     artifact = loads_json(model["artifact_json"], {})
-    if artifact.get("format") == "ai_pac_tp_forecast_v2":
-        predictions, detail, error = predict_tp_forecast_v2(model, data)
-        if predictions is None:
+    if artifact.get("format") == "ai_pac_tp_forecast_v3":
+        current_pac = current_pac_l_h(data, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
+        prediction, detail, error = predict_tp_forecast_model(model, data, {"PAC_ACTUAL": current_pac})
+        if prediction is None:
             return {"model_id": model["id"], "error": error}
-        selected_horizon = str(int(control["forecast_horizon_minutes"]))
-        selected_prediction = predictions.get(selected_horizon)
         return {
             "model_id": model["id"],
             "model_name": model["name"],
-            "predictions": predictions,
-            "predicted_tp_out": selected_prediction,
-            "horizon_minutes": int(selected_horizon),
+            "predicted_tp_out": round(prediction, 4),
+            "target_label": artifact.get("target_label") or "下一次出水TP检测数据",
             "detail": detail,
         }
+    if artifact.get("format") == "ai_pac_tp_forecast_v2":
+        return {"model_id": model["id"], "error": "模型文件仍使用旧预测格式，请重新训练"}
     prediction, detail, error = predict_legacy_tp_forecast_model(model, data)
     if prediction is None:
-        return {"model_id": model["id"], "error": error, "horizon_minutes": int(control["forecast_horizon_minutes"])}
+        return {"model_id": model["id"], "error": error}
     return {
         "model_id": model["id"],
         "model_name": model["name"],
         "predicted_tp_out": round(prediction, 4),
-        "horizon_minutes": int(control["forecast_horizon_minutes"]),
+        "target_label": "下一次出水TP检测数据",
         "detail": detail,
     }
 
 
-def predict_tp_forecast_v2(model: sqlite3.Row, data: dict[str, DataPoint], extra: dict[str, float] | None = None) -> tuple[dict[str, float] | None, dict[str, Any] | None, str | None]:
+def predict_tp_forecast_model(model: sqlite3.Row, data: dict[str, DataPoint], extra: dict[str, float] | None = None) -> tuple[float | None, dict[str, Any] | None, str | None]:
     artifact = loads_json(model["artifact_json"], {})
-    booster_models = artifact.get("booster_models")
-    if not isinstance(booster_models, dict) or not artifact.get("feature_names"):
-        return None, None, "模型文件无效"
-    try:
-        row, feature_values = model_feature_row(artifact, data, extra)
-        matrix = np.array([row], dtype=float)
-        predictions: dict[str, float] = {}
-        for horizon in ("30", "60", "120"):
-            item = booster_models.get(horizon)
-            if not item or not item.get("booster_model"):
-                return None, None, "模型文件缺少预测时长"
-            booster = lgb.Booster(model_str=item["booster_model"])
-            prediction = float(booster.predict(matrix)[0])
-            if not math.isfinite(prediction):
-                return None, None, "模型输出异常"
-            predictions[horizon] = round(prediction, 4)
-    except Exception:
-        return None, None, "模型推理异常"
-    return predictions, {"model_id": model["id"], "version": model["name"], "features": feature_values, "format": artifact.get("format")}, None
-
-
-def predict_tp_forecast_horizon(
-    model: sqlite3.Row,
-    data: dict[str, DataPoint],
-    horizon: str,
-    extra: dict[str, float] | None = None,
-) -> tuple[float | None, dict[str, Any] | None, str | None]:
-    artifact = loads_json(model["artifact_json"], {})
-    if artifact.get("format") != "ai_pac_tp_forecast_v2":
+    if artifact.get("format") != "ai_pac_tp_forecast_v3":
         return None, None, "模型文件格式已过期，请重新训练"
-    booster_models = artifact.get("booster_models")
-    if not isinstance(booster_models, dict) or not artifact.get("feature_names"):
+    if not artifact.get("booster_model") or not artifact.get("feature_names"):
         return None, None, "模型文件无效"
-    item = booster_models.get(horizon)
-    if not item or not item.get("booster_model"):
-        return None, None, "模型文件缺少预测时长"
     try:
         row, feature_values = model_feature_row(artifact, data, extra)
-        booster = lgb.Booster(model_str=item["booster_model"])
+        booster = lgb.Booster(model_str=artifact["booster_model"])
         prediction = float(booster.predict(np.array([row], dtype=float))[0])
+        if not math.isfinite(prediction):
+            return None, None, "模型输出异常"
     except Exception:
         return None, None, "模型推理异常"
-    if not math.isfinite(prediction):
-        return None, None, "模型输出异常"
-    return prediction, {"model_id": model["id"], "version": model["name"], "features": feature_values, "format": artifact.get("format"), "horizon": horizon}, None
+    return prediction, {"model_id": model["id"], "version": model["name"], "features": feature_values, "format": artifact.get("format"), "target_label": artifact.get("target_label")}, None
 
 
 def point_control(con: sqlite3.Connection, point: sqlite3.Row) -> sqlite3.Row:
@@ -443,7 +411,7 @@ def calculate_for_point(
             raw = optimized
             mode = "normal"
             ai_detail = detail
-            reasons.append(f"正常模式：枚举PAC加药流量，按{int(control['forecast_horizon_minutes'])}分钟预测TP寻找刚低于目标TP {float(control['tp_target_mg_l']):.4g} mg/L 的最小加药量")
+            reasons.append(f"正常模式：枚举PAC加药流量，按下一次出水TP检测数据寻找刚低于目标TP {float(control['tp_target_mg_l']):.4g} mg/L 的最小加药量")
         else:
             reasons.append(error or "无投用出水TP预测模型，使用保守公式")
     else:
@@ -467,7 +435,6 @@ def optimize_pac_by_tp_forecast_model(
     data: dict[str, DataPoint],
     control: sqlite3.Row,
 ) -> tuple[float | None, dict[str, Any] | None, str | None]:
-    horizon = str(int(control["forecast_horizon_minutes"]))
     target_tp = float(control["tp_target_mg_l"])
     min_l_h = float(control["pac_min_l_h"])
     max_l_h = float(control["pac_max_l_h"])
@@ -479,14 +446,14 @@ def optimize_pac_by_tp_forecast_model(
     last_prediction: tuple[float, float] | None = None
     checked = 0
     current_pac = current_pac_l_h(data, min_l_h, max_l_h)
-    current_prediction, _current_detail, current_error = predict_tp_forecast_horizon(model, data, horizon, {"PAC_ACTUAL": current_pac})
+    current_prediction, _current_detail, current_error = predict_tp_forecast_model(model, data, {"PAC_ACTUAL": current_pac})
     if current_prediction is None:
         return None, None, current_error
     for index in range(steps + 1):
         candidate = round(min_l_h + index * 0.1, 1)
         if candidate > max_l_h:
             candidate = max_l_h
-        prediction, _detail, error = predict_tp_forecast_horizon(model, data, horizon, {"PAC_ACTUAL": candidate})
+        prediction, _detail, error = predict_tp_forecast_model(model, data, {"PAC_ACTUAL": candidate})
         if prediction is None:
             return None, None, error
         checked += 1
@@ -497,7 +464,7 @@ def optimize_pac_by_tp_forecast_model(
             best = (candidate, prediction)
             break
     if best is None and (last_prediction is None or last_prediction[0] < max_l_h):
-        prediction, _detail, error = predict_tp_forecast_horizon(model, data, horizon, {"PAC_ACTUAL": max_l_h})
+        prediction, _detail, error = predict_tp_forecast_model(model, data, {"PAC_ACTUAL": max_l_h})
         if prediction is None:
             return None, None, error
         checked += 1
@@ -510,7 +477,7 @@ def optimize_pac_by_tp_forecast_model(
         detail = {
             "model_id": model["id"],
             "version": model["name"],
-            "horizon_minutes": int(horizon),
+            "target_label": "下一次出水TP检测数据",
             "target_tp": target_tp,
             "current_l_h": current_pac,
             "current_predicted_tp_out": round(current_prediction, 4),
@@ -531,7 +498,7 @@ def optimize_pac_by_tp_forecast_model(
         {
             "model_id": model["id"],
             "version": model["name"],
-            "horizon_minutes": int(horizon),
+            "target_label": "下一次出水TP检测数据",
             "target_tp": target_tp,
             "selected_l_h": selected_l_h,
             "predicted_tp_out": round(selected_tp, 4),

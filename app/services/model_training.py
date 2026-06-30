@@ -17,34 +17,170 @@ from app.schemas import ModelSampleImportIn
 
 
 MODEL_SAMPLE_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk")
+MODEL_SAMPLE_TIME_FORMATS = (
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+)
 MODEL_KIND_TP_OUT_RESPONSE = "tp_out_response"
-TP_FORECAST_TARGETS = [
-    ("TP_OUT_30", "_training_target_tp_out_30", "未来30分钟出水TP", "30"),
-    ("TP_OUT_60", "_training_target_tp_out_60", "未来60分钟出水TP", "60"),
-    ("TP_OUT_120", "_training_target_tp_out_120", "未来120分钟出水TP", "120"),
-]
-TP_FORECAST_FEATURES = [
+MODEL_KIND_PAC_FLOW_PREDICT = "pac_flow_predict"
+SUPPORTED_MODEL_KINDS = {MODEL_KIND_TP_OUT_RESPONSE, MODEL_KIND_PAC_FLOW_PREDICT}
+TP_FORECAST_TARGET = ("TP_OUT_NEXT", "_training_target_tp_out_next", "下一次出水TP检测数据")
+PAC_FLOW_TARGET = ("PAC_ACTUAL", "_training_target_pac_actual", "实际加药流量")
+TP_FORECAST_LEGACY_TARGET_ALIASES = (
+    "下一次出水TP检测数据",
+    "下一次出水TP",
+    "下次出水TP",
+    "未来出水TP",
+    "目标出水TP",
+    "TP_OUT_NEXT",
+    "target_tp_out_next",
+    "_training_target_tp_out_next",
+    "未来60分钟出水TP",
+    "TP_OUT_60",
+    "target_tp_out_60",
+    "_training_target_tp_out_60",
+)
+PAC_FLOW_TARGET_ALIASES = (
+    "实际加药流量",
+    "加药流量",
+    "PAC_ACTUAL",
+    "target_pac_actual",
+    "_training_target_pac_actual",
+)
+MODEL_INPUT_FEATURES = [
     ("Q", None, "参考流量", "m3/h"),
-    ("TP_BEFORE", "in_tp_tag_id", "进水总磷", "mg/L"),
+    ("TP_BEFORE", "in_tp_tag_id", "进水TP", "mg/L"),
     ("PH", "in_ph_tag_id", "进水PH", ""),
-    ("OUT_Q", "out_flow_tag_id", "出水流量", "m3/h"),
-    ("TP_OUT", "out_tp_tag_id", "当前出水总磷", "mg/L"),
-    ("REFLUX_Q1", "reflux_flow_1_tag_id", "高密A1回流流量", "m3/h"),
-    ("REFLUX_Q2", "reflux_flow_2_tag_id", "高密A2回流流量", "m3/h"),
+    ("TP_OUT", "out_tp_tag_id", "出水TP", "mg/L"),
+    ("REFLUX_Q1", "reflux_flow_1_tag_id", "回流流量1", "m3/h"),
+    ("REFLUX_Q2", "reflux_flow_2_tag_id", "回流流量2", "m3/h"),
     ("BIO_ORP1", "bio_orp1_tag_id", "生化池A东ORP1", "mV"),
     ("BIO_ORP2", "bio_orp2_tag_id", "生化池A东ORP2", "mV"),
     ("BIO_ORP3", "bio_orp3_tag_id", "生化池A西ORP1", "mV"),
     ("BIO_ORP4", "bio_orp4_tag_id", "生化池A西ORP2", "mV"),
-    ("BIO_DO1", "bio_do1_tag_id", "生化池A东DO", "mg/L"),
-    ("BIO_DO2", "bio_do2_tag_id", "生化池A西DO", "mg/L"),
-    ("BIO_MLSS1", "bio_mlss1_tag_id", "生化池A东MLSS", "mg/L"),
-    ("BIO_MLSS2", "bio_mlss2_tag_id", "生化池A西MLSS", "mg/L"),
-    ("PAC_ACTUAL", "pac_flow_tag_id", "实际加药流量", "L/h"),
+    ("BIO_MLSS1", "bio_mlss1_tag_id", "生化池MLSS1", "mg/L"),
+    ("BIO_MLSS2", "bio_mlss2_tag_id", "生化池MLSS2", "mg/L"),
 ]
+SPLIT_METHODS = {"time", "random"}
+OBJECTIVES = {"huber", "regression_l2", "regression_l1"}
+SAMPLE_WEIGHT_RULES = {"none", "high_target"}
+
+
+def model_row_value(model, key: str, default: Any = None) -> Any:
+    if isinstance(model, dict):
+        return model.get(key, default)
+    return model[key] if key in model.keys() else default
 
 
 def model_kind(model) -> str:
-    return model["model_kind"] if "model_kind" in model.keys() and model["model_kind"] else MODEL_KIND_TP_OUT_RESPONSE
+    return model_row_value(model, "model_kind", MODEL_KIND_TP_OUT_RESPONSE) or MODEL_KIND_TP_OUT_RESPONSE
+
+
+def default_training_config(kind: str, schema: list[dict[str, Any]]) -> dict[str, Any]:
+    _target_name, target_key, _target_label = target_definition_for_kind(kind)
+    feature_columns = [str(item["key"]) for item in schema]
+    return {
+        "target_column": target_key,
+        "feature_columns": feature_columns,
+        "prediction_step": 1,
+        "valid_ratio": 0.2,
+        "split_method": "time",
+        "objective": "huber",
+        "learning_rate": 0.03,
+        "num_boost_round": 500,
+        "early_stopping_rounds": 50,
+        "num_leaves": 7,
+        "max_depth": 3,
+        "min_data_in_leaf": 20,
+        "lambda_l2": 3.0,
+        "feature_fraction": 1.0,
+        "bagging_fraction": 0.85,
+        "bagging_freq": 1,
+        "monotone_constraints": {key: 0 for key in feature_columns},
+        "sample_weight_rule": "none",
+    }
+
+
+def _config_float(value: Any, default: float, min_value: float, max_value: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    if not math.isfinite(number):
+        number = default
+    return min(max(number, min_value), max_value)
+
+
+def _config_int(value: Any, default: int, min_value: int, max_value: int) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = default
+    return min(max(number, min_value), max_value)
+
+
+def normalize_training_config(raw: Any, kind: str, schema: list[dict[str, Any]]) -> dict[str, Any]:
+    if kind not in SUPPORTED_MODEL_KINDS:
+        raise HTTPException(422, "模型类型不支持")
+    base = default_training_config(kind, schema)
+    raw = raw if isinstance(raw, dict) else {}
+    schema_keys = [str(item["key"]) for item in schema]
+    requested_features = raw.get("feature_columns", base["feature_columns"])
+    if not isinstance(requested_features, list):
+        requested_features = base["feature_columns"]
+    feature_columns = [str(key) for key in requested_features if str(key) in schema_keys]
+    if not feature_columns:
+        raise HTTPException(422, "至少需要选择 1 个输入字段")
+
+    raw_constraints = raw.get("monotone_constraints", {})
+    if isinstance(raw_constraints, list):
+        raw_constraints = {
+            key: raw_constraints[index]
+            for index, key in enumerate(schema_keys)
+            if index < len(raw_constraints)
+        }
+    if not isinstance(raw_constraints, dict):
+        raw_constraints = {}
+    constraints: dict[str, int] = {}
+    for key in schema_keys:
+        try:
+            constraint = int(raw_constraints.get(key, base["monotone_constraints"][key]))
+        except (TypeError, ValueError):
+            constraint = 0
+        constraints[key] = constraint if constraint in {-1, 0, 1} else 0
+
+    split_method = str(raw.get("split_method", base["split_method"]))
+    objective = str(raw.get("objective", base["objective"]))
+    sample_weight_rule = str(raw.get("sample_weight_rule", base["sample_weight_rule"]))
+    return {
+        "target_column": target_definition_for_kind(kind)[1],
+        "feature_columns": feature_columns,
+        "prediction_step": _config_int(raw.get("prediction_step"), base["prediction_step"], 1, 24),
+        "valid_ratio": _config_float(raw.get("valid_ratio"), base["valid_ratio"], 0.05, 0.5),
+        "split_method": split_method if split_method in SPLIT_METHODS else base["split_method"],
+        "objective": objective if objective in OBJECTIVES else base["objective"],
+        "learning_rate": _config_float(raw.get("learning_rate"), base["learning_rate"], 0.001, 1.0),
+        "num_boost_round": _config_int(raw.get("num_boost_round"), base["num_boost_round"], 10, 2000),
+        "early_stopping_rounds": _config_int(raw.get("early_stopping_rounds"), base["early_stopping_rounds"], 0, 300),
+        "num_leaves": _config_int(raw.get("num_leaves"), base["num_leaves"], 2, 255),
+        "max_depth": _config_int(raw.get("max_depth"), base["max_depth"], -1, 32),
+        "min_data_in_leaf": _config_int(raw.get("min_data_in_leaf"), base["min_data_in_leaf"], 1, 10000),
+        "lambda_l2": _config_float(raw.get("lambda_l2"), base["lambda_l2"], 0.0, 1000.0),
+        "feature_fraction": _config_float(raw.get("feature_fraction"), base["feature_fraction"], 0.1, 1.0),
+        "bagging_fraction": _config_float(raw.get("bagging_fraction"), base["bagging_fraction"], 0.1, 1.0),
+        "bagging_freq": _config_int(raw.get("bagging_freq"), base["bagging_freq"], 0, 100),
+        "monotone_constraints": constraints,
+        "sample_weight_rule": sample_weight_rule if sample_weight_rule in SAMPLE_WEIGHT_RULES else base["sample_weight_rule"],
+    }
+
+
+def training_config_for_model(model, kind: str, schema: list[dict[str, Any]]) -> dict[str, Any]:
+    raw = loads_json(model_row_value(model, "training_config_json", "{}"), {})
+    return normalize_training_config(raw, kind, schema)
 
 
 def training_target_column(con) -> str:
@@ -88,14 +224,15 @@ def current_model_feature_schema(con, dosing_point_id: int, kind: str | None = N
     point = con.execute("SELECT * FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
     if not point:
         raise HTTPException(404, "投加点不存在")
-    if kind != MODEL_KIND_TP_OUT_RESPONSE:
-        raise HTTPException(410, "投加量预测模型已删除，请使用出水TP预测模型")
-    return tp_forecast_feature_schema(con, point)
+    kind = kind or MODEL_KIND_TP_OUT_RESPONSE
+    if kind not in SUPPORTED_MODEL_KINDS:
+        raise HTTPException(422, "模型类型不支持")
+    return model_input_feature_schema(con, point)
 
 
-def tp_forecast_feature_schema(con, point) -> list[dict[str, Any]]:
+def model_input_feature_schema(con, point) -> list[dict[str, Any]]:
     schema: list[dict[str, Any]] = []
-    for key, field_name, label, default_unit in TP_FORECAST_FEATURES:
+    for key, field_name, label, default_unit in MODEL_INPUT_FEATURES:
         tag_id = point[field_name] if field_name else None
         tag = con.execute("SELECT id,tag_code,unit FROM sensor_tags WHERE id=?", (tag_id,)).fetchone() if tag_id else None
         schema.append(
@@ -178,19 +315,45 @@ def _model_csv_time_header(headers: dict[str, str]) -> str | None:
     return None
 
 
-def _tp_forecast_target_headers(headers: dict[str, str]) -> dict[str, str]:
-    aliases = {
-        "_training_target_tp_out_30": ("未来30分钟出水TP", "TP_OUT_30", "target_tp_out_30", "_training_target_tp_out_30"),
-        "_training_target_tp_out_60": ("未来60分钟出水TP", "TP_OUT_60", "target_tp_out_60", "_training_target_tp_out_60", "未来出水TP", "目标出水TP"),
-        "_training_target_tp_out_120": ("未来120分钟出水TP", "TP_OUT_120", "target_tp_out_120", "_training_target_tp_out_120"),
-    }
-    result: dict[str, str] = {}
-    for key, names in aliases.items():
-        for name in names:
-            if name in headers:
-                result[key] = name
-                break
-    return result
+def parse_model_csv_sample_time(value: Any, row_number: int) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        raise HTTPException(422, f"CSV 第 {row_number} 行时间不能为空")
+    try:
+        return datetime.fromisoformat(text).replace(microsecond=0).isoformat()
+    except ValueError:
+        pass
+    for time_format in MODEL_SAMPLE_TIME_FORMATS:
+        try:
+            return datetime.strptime(text, time_format).replace(microsecond=0).isoformat()
+        except ValueError:
+            continue
+    raise HTTPException(422, f"CSV 第 {row_number} 行时间格式无效")
+
+
+def target_definition_for_kind(kind: str) -> tuple[str, str, str]:
+    if kind == MODEL_KIND_PAC_FLOW_PREDICT:
+        return PAC_FLOW_TARGET
+    return TP_FORECAST_TARGET
+
+
+def target_aliases_for_kind(kind: str) -> tuple[str, ...]:
+    if kind == MODEL_KIND_PAC_FLOW_PREDICT:
+        return PAC_FLOW_TARGET_ALIASES
+    return TP_FORECAST_LEGACY_TARGET_ALIASES
+
+
+def model_artifact_format(kind: str) -> str:
+    if kind == MODEL_KIND_PAC_FLOW_PREDICT:
+        return "ai_pac_flow_predict_v1"
+    return "ai_pac_tp_forecast_v3"
+
+
+def _model_target_header(headers: dict[str, str], kind: str) -> str | None:
+    for name in target_aliases_for_kind(kind):
+        if name in headers:
+            return name
+    return None
 
 
 def _model_csv_feature_value(row: dict[str, Any], headers: dict[str, str], item: dict[str, Any], row_number: int) -> float | None:
@@ -211,29 +374,21 @@ def import_model_csv_samples(con, model, csv_text: str) -> dict[str, int]:
     time_header = _model_csv_time_header(headers)
     if not time_header:
         raise HTTPException(422, "CSV 必须包含“时间”列")
-    if kind != MODEL_KIND_TP_OUT_RESPONSE:
-        raise HTTPException(410, "投加量预测模型已删除，请使用出水TP预测模型")
-    target_headers = _tp_forecast_target_headers(headers)
-    missing = [label for _name, key, label, _horizon in TP_FORECAST_TARGETS if key not in target_headers]
-    if missing:
-        raise HTTPException(422, f"CSV 缺少标签列：{'、'.join(missing)}")
+    if kind not in SUPPORTED_MODEL_KINDS:
+        raise HTTPException(422, "模型类型不支持")
+    target_header = _model_target_header(headers, kind)
+    if not target_header:
+        raise HTTPException(422, f"CSV 缺少标签列：{target_definition_for_kind(kind)[2]}")
     rows_to_insert: list[tuple[int, str, dict[str, Any], float | None, float | None, str]] = []
     for index, row in enumerate(reader, start=2):
-        sample_time = str(row.get(headers[time_header]) or "").strip()
-        try:
-            sample_time = datetime.fromisoformat(sample_time).replace(microsecond=0).isoformat()
-        except ValueError as exc:
-            raise HTTPException(422, f"CSV 第 {index} 行时间格式无效") from exc
+        sample_time = parse_model_csv_sample_time(row.get(headers[time_header]), index)
         values: dict[str, float | None] = {}
         for item in schema:
             values[item["key"]] = model_sample_value(_model_csv_feature_value(row, headers, item, index))
-        target_values = {
-            key: model_sample_value(_model_csv_float(row.get(headers[target_headers[key]]), target_headers[key], index))
-            for _name, key, _label, _horizon in TP_FORECAST_TARGETS
-        }
-        values.update(target_values)
-        target = target_values["_training_target_tp_out_60"]
-        rows_to_insert.append((model["id"], sample_time, values, values.get("PAC_ACTUAL"), target, "csv_import"))
+        target = model_sample_value(_model_csv_float(row.get(headers[target_header]), target_header, index))
+        values[target_definition_for_kind(kind)[1]] = target
+        suggested_l_h = target if kind == MODEL_KIND_PAC_FLOW_PREDICT else values.get("PAC_ACTUAL")
+        rows_to_insert.append((model["id"], sample_time, values, suggested_l_h, target, "csv_import"))
     if not rows_to_insert:
         raise HTTPException(422, "CSV 中没有可导入的数据行")
     for row in rows_to_insert:
@@ -244,49 +399,38 @@ def import_model_csv_samples(con, model, csv_text: str) -> dict[str, int]:
 
 def train_model_project_artifact(con, model) -> dict[str, Any]:
     kind = model_kind(model)
-    if kind == MODEL_KIND_TP_OUT_RESPONSE:
-        return train_tp_forecast_artifact(con, model)
-    raise HTTPException(410, "投加量预测模型已删除，请使用出水TP预测模型")
+    if kind in SUPPORTED_MODEL_KINDS:
+        return train_regression_artifact(con, model, kind)
+    raise HTTPException(422, "模型类型不支持")
 
 
-def train_tp_forecast_artifact(con, model) -> dict[str, Any]:
-    trained_targets: dict[str, Any] = {}
-    metrics_by_target: dict[str, Any] = {}
-    feature_names: list[str] | None = None
-    feature_labels: dict[str, str] | None = None
-    for target_name, target_key, label, horizon in TP_FORECAST_TARGETS:
-        trained = build_regression_booster(con, model, target_key)
-        trained_targets[horizon] = {
-            "target": target_name,
-            "label": label,
-            "booster_model": trained["booster"].model_to_string(),
-        }
-        metrics_by_target[horizon] = trained["metrics"]
-        if feature_names is None:
-            feature_names = trained["feature_keys"]
-            feature_labels = trained["feature_labels"]
-        elif feature_names != trained["feature_keys"]:
-            raise HTTPException(409, "三个预测标签可用特征不一致，请检查 CSV 数据完整性")
+def train_regression_artifact(con, model, kind: str) -> dict[str, Any]:
+    target_name, target_key, label = target_definition_for_kind(kind)
+    trained = build_regression_booster(con, model, target_key)
     artifact = {
-        "format": "ai_pac_tp_forecast_v2",
-        "file_name": f"tp_forecast_model_{model['id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.lgb.txt",
-        "feature_names": feature_names or [],
-        "feature_labels": feature_labels or {},
-        "booster_models": trained_targets,
+        "format": model_artifact_format(kind),
+        "file_name": f"{kind}_model_{model['id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.lgb.txt",
+        "model_kind": kind,
+        "feature_names": trained["feature_keys"],
+        "feature_labels": trained["feature_labels"],
+        "target": target_name,
+        "target_label": label,
+        "training_config": trained["training_config"],
+        "lightgbm_params": trained["lightgbm_params"],
+        "booster_model": trained["booster"].model_to_string(),
         "lightgbm_version": lgb.__version__,
         "trained_at": utc_now_iso(),
-        "target": "TP_OUT_30_60_120",
     }
-    mae_values = [item["MAE"] for item in metrics_by_target.values()]
-    r2_values = [item["R2"] for item in metrics_by_target.values()]
-    sample_values = [item["samples"] for item in metrics_by_target.values()]
     metrics = {
-        "samples": min(sample_values),
-        "R2": round(float(np.mean(r2_values)), 4),
-        "MAE": round(float(np.mean(mae_values)), 4),
-        "feature_count": len(feature_names or []),
-        "target": "TP_OUT_30_60_120",
-        "targets": metrics_by_target,
+        "samples": trained["metrics"]["samples"],
+        "R2": trained["metrics"]["R2"],
+        "MAE": trained["metrics"]["MAE"],
+        "feature_count": len(trained["feature_keys"]),
+        "target": target_name,
+        "target_label": label,
+        "objective": trained["training_config"]["objective"],
+        "num_boost_round": trained["training_config"]["num_boost_round"],
+        "best_iteration": trained["booster"].best_iteration,
     }
     now = utc_now_iso()
     con.execute(
@@ -311,7 +455,13 @@ def build_regression_booster(con, model, target_key: str) -> dict[str, Any]:
     ]
     if len(samples) < 2:
         raise HTTPException(409, "至少需要 2 条包含目标值的训练样本")
+    kind = model_kind(model)
     schema = sync_model_feature_schema(con, model)
+    training_config = training_config_for_model(model, kind, schema)
+    if training_config["target_column"] != target_key:
+        raise HTTPException(422, "训练目标列与模型类型不匹配")
+    selected_features = set(training_config["feature_columns"])
+    training_schema = [item for item in schema if item["key"] in selected_features]
     usable_samples: list[tuple[dict[str, Any], float]] = []
     for sample in samples:
         values = sample.get("values", {})
@@ -327,12 +477,20 @@ def build_regression_booster(con, model, target_key: str) -> dict[str, Any]:
     if len(usable_samples) < 2:
         raise HTTPException(409, "缺少可用训练标签")
 
-    feature_keys, feature_labels = regression_feature_columns(schema, usable_samples)
+    feature_keys, feature_labels = regression_feature_columns(training_schema, usable_samples)
     matrix = regression_matrix(feature_keys, usable_samples)
     target = np.array([target_value for _, target_value in usable_samples], dtype=float)
-    booster, metrics = train_lgb_regression(matrix, target)
+    sample_weight = regression_sample_weight(target, training_config["sample_weight_rule"])
+    booster, metrics, lightgbm_params = train_lgb_regression(matrix, target, feature_keys, training_config, sample_weight)
     metrics.update({"samples": len(usable_samples), "feature_count": len(feature_keys)})
-    return {"booster": booster, "metrics": metrics, "feature_keys": feature_keys, "feature_labels": feature_labels}
+    return {
+        "booster": booster,
+        "metrics": metrics,
+        "feature_keys": feature_keys,
+        "feature_labels": feature_labels,
+        "training_config": training_config,
+        "lightgbm_params": lightgbm_params,
+    }
 
 
 def regression_feature_columns(schema: list[dict[str, Any]], usable_samples: list[tuple[dict[str, Any], float]]) -> tuple[list[str], dict[str, str]]:
@@ -356,27 +514,97 @@ def regression_matrix(feature_keys: list[str], usable_samples: list[tuple[dict[s
     )
 
 
-def train_lgb_regression(matrix: np.ndarray, target: np.ndarray) -> tuple[lgb.Booster, dict[str, Any]]:
-    dataset = lgb.Dataset(matrix, label=target, feature_name=[f"f{i}" for i in range(matrix.shape[1])] if matrix.shape[1] else None, free_raw_data=False)
+def monotone_constraints_for_features(feature_keys: list[str]) -> list[int]:
+    return [0 for _key in feature_keys]
+
+
+def configured_monotone_constraints(feature_keys: list[str], training_config: dict[str, Any]) -> list[int]:
+    constraints = training_config.get("monotone_constraints", {})
+    if not isinstance(constraints, dict):
+        return monotone_constraints_for_features(feature_keys)
+    values: list[int] = []
+    for key in feature_keys:
+        try:
+            constraint = int(constraints.get(key, 0))
+        except (TypeError, ValueError):
+            constraint = 0
+        values.append(constraint if constraint in {-1, 0, 1} else 0)
+    return values
+
+
+def regression_sample_weight(target: np.ndarray, rule: str) -> np.ndarray | None:
+    if rule != "high_target" or len(target) < 4:
+        return None
+    threshold = float(np.quantile(target, 0.75))
+    weights = np.ones(len(target), dtype=float)
+    weights[target >= threshold] = 2.0
+    return weights
+
+
+def train_valid_split_indices(size: int, training_config: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    valid_size = max(1, int(round(size * float(training_config["valid_ratio"]))))
+    valid_size = min(valid_size, size - 1)
+    if training_config["split_method"] == "random":
+        rng = np.random.default_rng(20260630)
+        indices = rng.permutation(size)
+        valid_indices = np.sort(indices[-valid_size:])
+        train_indices = np.sort(indices[:-valid_size])
+        return train_indices, valid_indices
+    train_size = size - valid_size
+    return np.arange(train_size), np.arange(train_size, size)
+
+
+def train_lgb_regression(
+    matrix: np.ndarray,
+    target: np.ndarray,
+    feature_keys: list[str],
+    training_config: dict[str, Any],
+    sample_weight: np.ndarray | None,
+) -> tuple[lgb.Booster, dict[str, Any], dict[str, Any]]:
+    train_indices, valid_indices = train_valid_split_indices(len(target), training_config)
+    train_matrix, train_target = matrix[train_indices], target[train_indices]
+    valid_matrix, valid_target = matrix[valid_indices], target[valid_indices]
+    train_weight = sample_weight[train_indices] if sample_weight is not None else None
+    valid_weight = sample_weight[valid_indices] if sample_weight is not None else None
+    feature_names = [f"f{i}" for i in range(matrix.shape[1])] if matrix.shape[1] else None
+    train_dataset = lgb.Dataset(train_matrix, label=train_target, weight=train_weight, feature_name=feature_names, free_raw_data=False)
+    valid_dataset = lgb.Dataset(valid_matrix, label=valid_target, weight=valid_weight, reference=train_dataset, feature_name=feature_names, free_raw_data=False)
+    params = {
+        "objective": training_config["objective"],
+        "metric": ["l1", "l2"],
+        "learning_rate": training_config["learning_rate"],
+        "num_leaves": training_config["num_leaves"],
+        "max_depth": training_config["max_depth"],
+        "min_data_in_leaf": training_config["min_data_in_leaf"],
+        "min_data_in_bin": 3,
+        "feature_pre_filter": False,
+        "monotone_constraints": configured_monotone_constraints(feature_keys, training_config),
+        "monotone_constraints_method": "advanced",
+        "lambda_l1": 0.01,
+        "lambda_l2": training_config["lambda_l2"],
+        "min_gain_to_split": 0.0005,
+        "feature_fraction": training_config["feature_fraction"],
+        "bagging_fraction": training_config["bagging_fraction"],
+        "bagging_freq": training_config["bagging_freq"],
+        "verbosity": -1,
+        "seed": 20260630,
+    }
+    callbacks = [lgb.log_evaluation(50)]
+    if training_config["early_stopping_rounds"] > 0:
+        callbacks.insert(0, lgb.early_stopping(training_config["early_stopping_rounds"]))
     booster = lgb.train(
-        {
-            "objective": "regression_l2",
-            "metric": "l2",
-            "learning_rate": 0.05,
-            "num_leaves": 7,
-            "min_data_in_leaf": 2,
-            "min_data_in_bin": 1,
-            "feature_pre_filter": False,
-            "verbosity": -1,
-            "seed": 20260630,
-        },
-        dataset,
-        num_boost_round=80,
+        params,
+        train_dataset,
+        valid_sets=[train_dataset, valid_dataset],
+        valid_names=["train", "valid"],
+        num_boost_round=training_config["num_boost_round"],
+        callbacks=callbacks,
     )
-    predictions = booster.predict(matrix)
+    num_iteration = booster.best_iteration if booster.best_iteration else None
+    predictions = booster.predict(matrix, num_iteration=num_iteration)
     target_mean = float(np.mean(target))
     sse = float(np.sum((target - predictions) ** 2))
     sst = float(np.sum((target - target_mean) ** 2))
     r2 = 1.0 if sst < 1e-12 else 1 - sse / sst
     mae = float(np.mean(np.abs(target - predictions)))
-    return booster, {"R2": round(r2, 4), "MAE": round(mae, 4)}
+    return booster, {"R2": round(r2, 4), "MAE": round(mae, 4)}, params

@@ -47,7 +47,6 @@ def public_process_parameter_group(row: dict[str, Any]) -> dict[str, Any]:
         "calculation_interval_seconds": row["calculation_interval_seconds"],
         "pac_density_kg_l": row.get("pac_density_kg_l", 1.2),
         "unit_dose_curve": row.get("unit_dose_curve", []),
-        "forecast_horizon_minutes": row.get("forecast_horizon_minutes", 120),
         "updated_at": row["updated_at"],
     }
 
@@ -57,8 +56,6 @@ def validate_process_parameter_group_payload(payload: ProcessParameterGroupIn) -
         raise HTTPException(422, "目标 TP 不能高于出水TP上限")
     if payload.pac_max_l_h < payload.pac_min_l_h:
         raise HTTPException(422, "最大 L/h 必须大于等于最小 L/h")
-    if payload.forecast_horizon_minutes not in {30, 60, 120}:
-        raise HTTPException(422, "出水TP预测时长只能选择 30、60 或 120 分钟")
     seen: set[float] = set()
     for point in payload.unit_dose_curve:
         if point.tp_mg_l in seen:
@@ -74,7 +71,6 @@ def process_parameter_group_values(payload: ProcessParameterGroupIn) -> tuple[An
         payload.tp_upper_mg_l,
         payload.pac_density_kg_l,
         dumps_json([item.model_dump() for item in sorted(payload.unit_dose_curve, key=lambda point: point.tp_mg_l)]),
-        payload.forecast_horizon_minutes,
         payload.pac_min_l_h,
         payload.pac_max_l_h,
         payload.calculation_interval_seconds,
@@ -97,9 +93,9 @@ def create_process_parameter_group(payload: ProcessParameterGroupIn) -> dict[str
             """
             INSERT INTO process_parameter_groups(
                 name,tp_target_mg_l,tp_limit_mg_l,tp_upper_mg_l,pac_density_kg_l,unit_dose_curve_json,
-                forecast_horizon_minutes,pac_min_l_h,pac_max_l_h,calculation_interval_seconds,
+                pac_min_l_h,pac_max_l_h,calculation_interval_seconds,
                 biochemical_phosphorus_removal_efficiency,inflow_delay_minutes,lag_minutes,feedback_kp,feedback_min,feedback_max,feedback_window_minutes,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             process_parameter_group_values(payload),
         )
@@ -119,7 +115,7 @@ def update_process_parameter_group(group_id: int, payload: ProcessParameterGroup
             """
             UPDATE process_parameter_groups
             SET name=?, tp_target_mg_l=?, tp_limit_mg_l=?, tp_upper_mg_l=?, pac_density_kg_l=?, unit_dose_curve_json=?,
-                forecast_horizon_minutes=?, pac_min_l_h=?, pac_max_l_h=?, calculation_interval_seconds=?,
+                pac_min_l_h=?, pac_max_l_h=?, calculation_interval_seconds=?,
                 biochemical_phosphorus_removal_efficiency=?, inflow_delay_minutes=?, lag_minutes=?, feedback_kp=?,
                 feedback_min=?, feedback_max=?, feedback_window_minutes=?, updated_at=?
             WHERE id=?

@@ -9,7 +9,14 @@ from pydantic import ValidationError
 from app.api.models import create_model_project
 from app.database import SCHEMA, dumps_json, ensure_runtime_schema
 from app.schemas import ModelProjectCreate
-from app.services.model_training import import_model_csv_samples, train_model_project_artifact
+from app.services.model_training import (
+    current_model_feature_schema,
+    import_model_csv_samples,
+    monotone_constraints_for_features,
+    normalize_training_config,
+    parse_model_csv_sample_time,
+    train_model_project_artifact,
+)
 from app.services.recommendation import (
     calculate_for_point,
     conservative_formula_l_h,
@@ -97,12 +104,60 @@ class RecommendationFormulaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ModelProjectCreate(name="投加量预测", dosing_point_id=1, model_kind="dose_predict")
 
-    def test_tp_response_model_forecast_uses_configured_horizon(self):
+    def test_pac_flow_predict_model_kind_is_accepted(self):
+        model = ModelProjectCreate(name="加药流量预测", dosing_point_id=1, model_kind="pac_flow_predict")
+        self.assertEqual(model.model_kind, "pac_flow_predict")
+
+    def test_model_inputs_have_no_monotone_constraints(self):
+        feature_keys = [
+            "Q",
+            "TP_BEFORE",
+            "PH",
+            "TP_OUT",
+            "REFLUX_Q1",
+            "REFLUX_Q2",
+            "BIO_ORP1",
+            "BIO_ORP2",
+            "BIO_ORP3",
+            "BIO_ORP4",
+            "BIO_MLSS1",
+            "BIO_MLSS2",
+        ]
+        self.assertEqual(
+            monotone_constraints_for_features(feature_keys),
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        )
+
+    def test_model_csv_time_accepts_slash_date_with_extra_spaces(self):
+        self.assertEqual(parse_model_csv_sample_time("2026/5/20  0:00:00", 2), "2026-05-20T00:00:00")
+
+    def test_tp_forecast_schema_uses_reduced_feature_set(self):
         con = self.memory_db()
-        con.execute("UPDATE process_parameter_groups SET forecast_horizon_minutes=30 WHERE id=1")
+        schema = current_model_feature_schema(con, 1, "tp_out_response")
+        self.assertEqual(
+            [item["key"] for item in schema],
+            [
+                "Q",
+                "TP_BEFORE",
+                "PH",
+                "TP_OUT",
+                "REFLUX_Q1",
+                "REFLUX_Q2",
+                "BIO_ORP1",
+                "BIO_ORP2",
+                "BIO_ORP3",
+                "BIO_ORP4",
+                "BIO_MLSS1",
+                "BIO_MLSS2",
+            ],
+        )
+        pac_schema = current_model_feature_schema(con, 1, "pac_flow_predict")
+        self.assertEqual([item["key"] for item in pac_schema], [item["key"] for item in schema])
+
+    def test_tp_response_model_forecast_uses_next_sample_target(self):
+        con = self.memory_db()
         schema = [
             {"key": "Q", "label": "参考流量", "tag_code": "Q"},
-            {"key": "TP_OUT", "label": "当前出水总磷", "tag_code": None},
             {"key": "PAC_ACTUAL", "label": "实际加药流量", "tag_code": None},
         ]
         cur = con.execute(
@@ -114,23 +169,105 @@ class RecommendationFormulaTests(unittest.TestCase):
         )
         model = con.execute("SELECT * FROM model_projects WHERE id=?", (cur.lastrowid,)).fetchone()
         csv_text = (
-            "时间,参考流量,当前出水总磷,实际加药流量,未来30分钟出水TP,未来60分钟出水TP,未来120分钟出水TP\n"
-            "2026-06-26T10:00:00,1000,0.2,20,0.30,0.28,0.26\n"
-            "2026-06-26T10:05:00,1200,0.25,30,0.20,0.18,0.17\n"
-            "2026-06-26T10:10:00,1400,0.28,40,0.12,0.11,0.10\n"
+            "时间,参考流量,实际加药流量,下一次出水TP检测数据\n"
+            "2026/5/20  0:00:00,1000,20,0.28\n"
+            "2026-06-26T10:05:00,1200,30,0.18\n"
+            "2026-06-26T10:10:00,1400,40,0.11\n"
         )
         import_model_csv_samples(con, model, csv_text)
+        stored_time = con.execute(
+            "SELECT sample_time FROM model_training_samples WHERE model_project_id=? ORDER BY sample_time LIMIT 1",
+            (cur.lastrowid,),
+        ).fetchone()["sample_time"]
+        self.assertEqual(stored_time, "2026-05-20T00:00:00")
         trained = train_model_project_artifact(con, con.execute("SELECT * FROM model_projects WHERE id=?", (cur.lastrowid,)).fetchone())
-        self.assertEqual(trained["artifact"]["format"], "ai_pac_tp_forecast_v2")
-        self.assertEqual(sorted(trained["artifact"]["booster_models"].keys()), ["120", "30", "60"])
+        self.assertEqual(trained["artifact"]["format"], "ai_pac_tp_forecast_v3")
+        self.assertEqual(trained["artifact"]["target"], "TP_OUT_NEXT")
+        self.assertIn("booster_model", trained["artifact"])
         con.execute("UPDATE model_projects SET status='published',published_at=? WHERE id=?", ("2026-06-26T11:00:00", cur.lastrowid))
         result = calculate_for_point(con, 1, save=False)
         self.assertEqual(result["mode"], "conservative")
         self.assertIsNotNone(result["tp_forecast"])
-        self.assertEqual(sorted(result["tp_forecast"]["predictions"].keys()), ["120", "30", "60"])
-        self.assertEqual(result["tp_forecast"]["horizon_minutes"], 30)
-        self.assertEqual(result["tp_forecast"]["predicted_tp_out"], result["tp_forecast"]["predictions"]["30"])
+        self.assertIn("predicted_tp_out", result["tp_forecast"])
+        self.assertEqual(result["tp_forecast"]["target_label"], "下一次出水TP检测数据")
+        self.assertNotIn("horizon_minutes", result["tp_forecast"])
         self.assertTrue(any("回退保守模式" in reason for reason in result["reasons"]))
+
+    def test_pac_flow_model_trains_with_actual_pac_target(self):
+        con = self.memory_db()
+        schema = [
+            {"key": "Q", "label": "参考流量", "tag_code": "Q"},
+            {"key": "TP_OUT", "label": "出水TP", "tag_code": None},
+        ]
+        cur = con.execute(
+            """
+            INSERT INTO model_projects(name,dosing_point_id,model_kind,status,sample_interval_minutes,feature_schema_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            ("pac-flow", 1, "pac_flow_predict", "draft", 5, dumps_json(schema), "2026-06-26T10:00:00", "2026-06-26T10:00:00"),
+        )
+        model = con.execute("SELECT * FROM model_projects WHERE id=?", (cur.lastrowid,)).fetchone()
+        csv_text = (
+            "时间,参考流量,出水TP,实际加药流量\n"
+            "2026-06-26T10:00:00,1000,0.28,20\n"
+            "2026-06-26T10:05:00,1200,0.22,30\n"
+            "2026-06-26T10:10:00,1400,0.16,40\n"
+        )
+        import_model_csv_samples(con, model, csv_text)
+        trained = train_model_project_artifact(con, con.execute("SELECT * FROM model_projects WHERE id=?", (cur.lastrowid,)).fetchone())
+        self.assertEqual(trained["artifact"]["format"], "ai_pac_flow_predict_v1")
+        self.assertEqual(trained["artifact"]["target"], "PAC_ACTUAL")
+        self.assertIn("booster_model", trained["artifact"])
+
+    def test_training_config_controls_features_and_lgb_params(self):
+        con = self.memory_db()
+        schema = [
+            {"key": "Q", "label": "参考流量", "tag_code": "Q"},
+            {"key": "TP_OUT", "label": "出水TP", "tag_code": None},
+        ]
+        training_config = normalize_training_config(
+            {
+                "feature_columns": ["Q"],
+                "objective": "regression_l2",
+                "num_boost_round": 30,
+                "early_stopping_rounds": 5,
+                "monotone_constraints": {"Q": -1},
+                "sample_weight_rule": "high_target",
+            },
+            "pac_flow_predict",
+            schema,
+        )
+        cur = con.execute(
+            """
+            INSERT INTO model_projects(name,dosing_point_id,model_kind,status,sample_interval_minutes,feature_schema_json,training_config_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "pac-flow-configured",
+                1,
+                "pac_flow_predict",
+                "draft",
+                5,
+                dumps_json(schema),
+                dumps_json(training_config),
+                "2026-06-26T10:00:00",
+                "2026-06-26T10:00:00",
+            ),
+        )
+        model = con.execute("SELECT * FROM model_projects WHERE id=?", (cur.lastrowid,)).fetchone()
+        csv_text = (
+            "时间,参考流量,出水TP,实际加药流量\n"
+            "2026-06-26T10:00:00,1000,0.28,20\n"
+            "2026-06-26T10:05:00,1200,0.22,30\n"
+            "2026-06-26T10:10:00,1400,0.16,40\n"
+            "2026-06-26T10:15:00,1600,0.12,50\n"
+        )
+        import_model_csv_samples(con, model, csv_text)
+        trained = train_model_project_artifact(con, con.execute("SELECT * FROM model_projects WHERE id=?", (cur.lastrowid,)).fetchone())
+        self.assertEqual(trained["artifact"]["feature_names"], ["Q"])
+        self.assertEqual(trained["artifact"]["training_config"]["objective"], "regression_l2")
+        self.assertEqual(trained["artifact"]["training_config"]["num_boost_round"], 30)
+        self.assertEqual(trained["artifact"]["lightgbm_params"]["monotone_constraints"], [-1])
 
 
 if __name__ == "__main__":

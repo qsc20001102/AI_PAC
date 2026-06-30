@@ -242,7 +242,6 @@ def public_control_config(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "calculation_interval_seconds": row["calculation_interval_seconds"],
         "pac_density_kg_l": row.get("pac_density_kg_l", 1.2),
         "unit_dose_curve": row.get("unit_dose_curve", []),
-        "forecast_horizon_minutes": row.get("forecast_horizon_minutes", 120),
         "updated_at": row["updated_at"],
     }
 

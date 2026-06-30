@@ -476,6 +476,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             output_min REAL NOT NULL DEFAULT 0.70,
             output_max REAL NOT NULL DEFAULT 1.30,
             feature_schema_json TEXT NOT NULL DEFAULT '[]',
+            training_config_json TEXT NOT NULL DEFAULT '{}',
             artifact_json TEXT NOT NULL DEFAULT '{}',
             metrics_json TEXT NOT NULL DEFAULT '{}',
             trained_at TEXT,
@@ -600,6 +601,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
         {
             "sample_interval_minutes": "INTEGER NOT NULL DEFAULT 5",
             "model_kind": "TEXT NOT NULL DEFAULT 'tp_out_response'",
+            "training_config_json": "TEXT NOT NULL DEFAULT '{}'",
         },
     )
     # Recording is runtime activity, not a model lifecycle state. Restore models

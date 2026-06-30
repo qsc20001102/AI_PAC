@@ -77,7 +77,7 @@ function modelDisplayStatusClass(model) {
 }
 
 function modelKindLabel(model) {
-  return "出水TP预测";
+  return model?.model_kind === "pac_flow_predict" ? "加药流量预测" : "下次出水TP预测";
 }
 
 function renderNewModelWorkspace(points) {
@@ -89,7 +89,10 @@ function renderNewModelWorkspace(points) {
         <div class="form-grid">
           ${field("name", "模型名称", defaultName, "text")}
           ${selectField("dosing_point_id", "训练投加点", points.map((point) => ({ value: String(point.id), label: `${point.name} (${point.code})` })), String(points[0]?.id || ""))}
-          <input name="model_kind" type="hidden" value="tp_out_response">
+          ${selectField("model_kind", "模型类型", [
+            { value: "tp_out_response", label: "下次出水TP预测" },
+            { value: "pac_flow_predict", label: "加药流量预测" },
+          ], "tp_out_response")}
           <input name="sample_interval_minutes" type="hidden" value="5">
         </div>
         <div class="btn-row"><button class="btn primary" type="submit">创建并配置样本</button><button class="btn" id="cancelNewModelBtn" type="button">取消</button></div>
@@ -102,30 +105,26 @@ function renderModelWorkspace(detail) {
   const { model, columns, samples } = detail;
   const metrics = model.metrics || {};
   const artifact = model.artifact || {};
-  const sampleTargetLabel = "未来出水TP";
-  const deployText = "投用后进入正常模式：系统枚举PAC加药流量，用模型预测所选时长出水TP，并选择刚低于目标TP的最小加药量。";
+  const sampleTargetLabel = modelTargetLabel(model);
+  const deployText = model.model_kind === "pac_flow_predict"
+    ? "加药流量预测模型用于离线训练和对比分析，不会替代当前闭环推荐逻辑。"
+    : "投用后进入正常模式：系统枚举PAC加药流量，用模型预测下一次出水TP检测数据，并选择刚低于目标TP的最小加药量。";
   return `
     <div class="panel-header">
       <div><div class="panel-title">${htmlEscape(model.name)}</div><div class="muted">训练投加点：${htmlEscape(model.dosing_point_name)}　类型：${modelKindLabel(model)}　状态：<span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span></div></div>
       <button class="btn" id="deleteModelBtn" type="button">删除模型</button>
     </div>
     <div class="panel-body model-workspace-body">
-      <form id="modelConfigForm" class="model-config-form">
-        <div class="form-grid">
-          ${field("name", "模型名称", model.name, "text")}
-          <input name="sample_interval_minutes" type="hidden" value="${htmlEscape(model.sample_interval_minutes || 5)}">
-        </div>
-        <div class="btn-row"><button class="btn ghost" type="submit">保存模型参数</button><span class="muted">模型绑定投加点后不可修改，避免混入不同工艺条件的样本。</span></div>
-      </form>
+      ${renderModelTrainingConfig(model, columns)}
 
       <section class="model-step model-sample-step">
-        <div class="model-step-title"><span>1</span><div>导入训练样本</div><small>展示 ${samples.length} / ${model.sample_count || 0} 条</small></div>
+        <div class="model-step-title"><span>2</span><div>导入训练样本</div><small>展示 ${samples.length} / ${model.sample_count || 0} 条</small></div>
         <div class="model-step-actions">
           <button class="btn ghost" id="refreshModelSamplesBtn" type="button">刷新样本</button>
           <button class="btn ghost" id="exportModelSamplesBtn" type="button">导出 CSV</button>
           <label class="btn primary file-button" for="modelCsvInput">导入 CSV</label><input id="modelCsvInput" type="file" accept=".csv,text/csv" hidden>
         </div>
-        <div class="muted model-sampling-note">出水TP预测模型使用未来30/60/120分钟出水TP作为标签，标签不会进入输入特征。</div>
+        <div class="muted model-sampling-note">${htmlEscape(modelKindLabel(model))}使用${htmlEscape(sampleTargetLabel)}作为标签，标签不会进入输入特征。</div>
         <div class="model-sample-query">
           <label>开始时间<input id="modelSampleStart" type="datetime-local" value="${htmlEscape(state.modelSampleStart || "")}"></label>
           <label>结束时间<input id="modelSampleEnd" type="datetime-local" value="${htmlEscape(state.modelSampleEnd || "")}"></label>
@@ -138,18 +137,224 @@ function renderModelWorkspace(detail) {
       </section>
 
       <section class="model-step">
-        <div class="model-step-title"><span>2</span><div>训练模型</div><small>${model.trained_at ? `最近训练：${dateMinute(model.trained_at)}` : "尚未训练"}</small></div>
+        <div class="model-step-title"><span>3</span><div>训练模型</div><small>${model.trained_at ? `最近训练：${dateMinute(model.trained_at)}` : "尚未训练"}</small></div>
         <div class="model-step-actions"><button class="btn primary" id="trainModelBtn" type="button" ${samples.length < 2 ? "disabled" : ""}>开始训练</button>${model.trained_at ? '<button class="btn ghost" id="downloadModelArtifactBtn" type="button">下载模型文件</button>' : ""}</div>
-        ${model.trained_at ? `<div class="model-metrics"><span>LightGBM</span><span>训练样本 ${metrics.samples ?? 0}</span><span>R² ${fmtCompact(metrics.R2, 4)}</span><span>MAE ${fmtCompact(metrics.MAE, 4)} mg/L</span><span>有效特征 ${metrics.feature_count ?? 0}</span><span>${htmlEscape(artifact.file_name || "模型文件已生成")}</span></div>` : '<div class="muted">样本数达到 2 条且覆盖变化工况后可开始 LightGBM 训练。</div>'}
+        ${model.trained_at ? `<div class="model-metrics"><span>LightGBM</span><span>训练样本 ${metrics.samples ?? 0}</span><span>R² ${fmtCompact(metrics.R2, 4)}</span><span>MAE ${fmtCompact(metrics.MAE, 4)}</span><span>有效特征 ${metrics.feature_count ?? 0}</span><span>${htmlEscape(artifact.file_name || "模型文件已生成")}</span></div>` : '<div class="muted">样本数达到 2 条且覆盖变化工况后可开始 LightGBM 训练。</div>'}
       </section>
 
       <section class="model-step">
-        <div class="model-step-title"><span>3</span><div>投用</div><small>${model.published_at ? `投用时间：${dateMinute(model.published_at)}` : "未投用"}</small></div>
+        <div class="model-step-title"><span>4</span><div>投用</div><small>${model.published_at ? `投用时间：${dateMinute(model.published_at)}` : "未投用"}</small></div>
         <div class="model-step-actions"><button class="btn ${model.status === "published" ? "" : "primary"}" id="deployModelBtn" type="button" ${model.trained_at ? "" : "disabled"}>${model.status === "published" ? "停止投用" : "投用模型"}</button></div>
         <div class="muted">${deployText}</div>
       </section>
     </div>
   `;
+}
+
+function renderModelTrainingConfig(model, columns) {
+  const config = modelTrainingConfig(model, columns);
+  return `
+    <section class="model-step model-config-step">
+      <form id="modelConfigForm">
+        <div class="model-step-title"><span>1</span><div>模型参数配置</div><small>${htmlEscape(modelTargetLabel(model))}</small></div>
+        <div class="model-config-name-row">
+          ${field("name", "模型名称", model.name, "text")}
+          <input name="sample_interval_minutes" type="hidden" value="${htmlEscape(model.sample_interval_minutes || 5)}">
+          <input name="target_column" type="hidden" value="${htmlEscape(modelTrainingTargetKey(model))}">
+          <div class="field model-help" data-help="${modelHelpAttr("target_column", model)}"><label>target_column</label><input type="text" value="${htmlEscape(modelTargetLabel(model))}" disabled></div>
+        </div>
+        <div class="model-feature-config">
+          <div class="model-config-subtitle model-help" data-help="${modelHelpAttr("feature_columns", model)}">feature_columns</div>
+          <div class="model-feature-grid">
+            ${columns.map((column) => `
+              <label class="model-feature-option model-help" data-help="${modelHelpAttr("feature_columns", model)}">
+                <input data-model-feature-column="${htmlEscape(column.key)}" type="checkbox" ${config.feature_columns.includes(column.key) ? "checked" : ""}>
+                <span>${htmlEscape(column.label)}</span>
+              </label>
+            `).join("")}
+          </div>
+        </div>
+        <div class="model-param-grid">
+          ${modelNumberField("prediction_step", config.prediction_step, 1, 24, "1", model)}
+          ${modelNumberField("valid_ratio", config.valid_ratio, 0.05, 0.5, "0.01", model)}
+          ${modelSelectField("split_method", [
+            { value: "time", label: "time" },
+            { value: "random", label: "random" },
+          ], config.split_method, model)}
+          ${modelSelectField("objective", [
+            { value: "huber", label: "huber" },
+            { value: "regression_l2", label: "regression_l2" },
+            { value: "regression_l1", label: "regression_l1" },
+          ], config.objective, model)}
+          ${modelNumberField("learning_rate", config.learning_rate, 0.001, 1, "0.001", model)}
+          ${modelNumberField("num_boost_round", config.num_boost_round, 10, 2000, "1", model)}
+          ${modelNumberField("early_stopping_rounds", config.early_stopping_rounds, 0, 300, "1", model)}
+          ${modelNumberField("num_leaves", config.num_leaves, 2, 255, "1", model)}
+          ${modelNumberField("max_depth", config.max_depth, -1, 32, "1", model)}
+          ${modelNumberField("min_data_in_leaf", config.min_data_in_leaf, 1, 10000, "1", model)}
+          ${modelNumberField("lambda_l2", config.lambda_l2, 0, 1000, "0.01", model)}
+          ${modelNumberField("feature_fraction", config.feature_fraction, 0.1, 1, "0.01", model)}
+          ${modelNumberField("bagging_fraction", config.bagging_fraction, 0.1, 1, "0.01", model)}
+          ${modelNumberField("bagging_freq", config.bagging_freq, 0, 100, "1", model)}
+          ${modelSelectField("sample_weight_rule", [
+            { value: "none", label: "none" },
+            { value: "high_target", label: "high_target" },
+          ], config.sample_weight_rule, model)}
+        </div>
+        <div class="model-feature-config">
+          <div class="model-config-subtitle model-help" data-help="${modelHelpAttr("monotone_constraints", model)}">monotone_constraints</div>
+          <div class="model-constraint-grid">
+            ${columns.map((column) => `
+              <label class="model-constraint-row model-help" data-help="${modelHelpAttr("monotone_constraints", model)}">
+                <span>${htmlEscape(column.label)}</span>
+                <select data-model-monotone="${htmlEscape(column.key)}">
+                  ${[-1, 0, 1].map((value) => `<option value="${value}" ${Number(config.monotone_constraints[column.key] || 0) === value ? "selected" : ""}>${value}</option>`).join("")}
+                </select>
+              </label>
+            `).join("")}
+          </div>
+        </div>
+        <div class="btn-row"><button class="btn ghost" type="submit">保存模型参数</button><span class="muted">模型绑定投加点后不可修改，避免混入不同工艺条件的样本。</span></div>
+      </form>
+    </section>
+  `;
+}
+
+function modelNumberField(name, value, min, max, step, model) {
+  const minAttr = min == null ? "" : ` min="${htmlEscape(min)}"`;
+  const maxAttr = max == null ? "" : ` max="${htmlEscape(max)}"`;
+  return `
+    <div class="field model-help" data-help="${modelHelpAttr(name, model)}">
+      <label for="${name}">${name}</label>
+      <input id="${name}" name="${name}" type="number"${minAttr}${maxAttr} step="${htmlEscape(step)}" value="${htmlEscape(value)}">
+    </div>
+  `;
+}
+
+function modelSelectField(name, options, value, model) {
+  return `
+    <div class="field model-help" data-help="${modelHelpAttr(name, model)}">
+      <label for="${name}">${name}</label>
+      <select id="${name}" name="${name}">
+        ${options.map((opt) => `<option value="${htmlEscape(opt.value)}" ${String(opt.value) === String(value) ? "selected" : ""}>${htmlEscape(opt.label)}</option>`).join("")}
+      </select>
+    </div>
+  `;
+}
+
+function modelHelpAttr(name, model) {
+  return htmlEscape(modelParamHelp(name, model)).replaceAll("\n", "&#10;");
+}
+
+function modelParamHelp(name, model) {
+  const targetDefault = modelTargetLabel(model);
+  const featureDefault = "默认勾选当前模型全部输入字段";
+  const helps = {
+    target_column: `作用：预测目标列\\A建议默认值：${targetDefault}\\A调整建议：不同模型类型必须对应不同目标列，页面会按模型类型自动固定。`,
+    feature_columns: `作用：输入字段\\A建议默认值：${featureDefault}\\A调整建议：不同数据表字段变化时调整；至少保留 1 个有变化的数值字段。`,
+    prediction_step: "作用：预测步长\\A建议默认值：1\\A调整建议：2小时数据预测下一次检测就填 1。",
+    valid_ratio: "作用：验证集比例\\A建议默认值：0.2\\A调整建议：数据少用 0.2，数据多可调到 0.15。",
+    split_method: "作用：划分方式\\A建议默认值：time\\A调整建议：工业时序数据必须按时间切分；只在明确要随机抽样验证时用 random。",
+    objective: "作用：损失函数\\A建议默认值：huber\\A调整建议：异常点多用 huber，数据平稳可用 regression_l2。",
+    learning_rate: "作用：学习率\\A建议默认值：0.03\\A调整建议：数据少不要太大；训练波动大时降低。",
+    num_boost_round: "作用：最大树数量\\A建议默认值：300~500，当前默认 500\\A调整建议：配合 early_stopping 使用，数据多可适当增加。",
+    early_stopping_rounds: "作用：早停轮数\\A建议默认值：30~50，当前默认 50\\A调整建议：数据少用 30，数据多用 50。",
+    num_leaves: "作用：树复杂度\\A建议默认值：7 或 15，当前默认 7\\A调整建议：数据少用 7，数据多且欠拟合时可调到 15。",
+    max_depth: "作用：树最大深度\\A建议默认值：3 或 4，当前默认 3\\A调整建议：数据少用 3，欠拟合时再尝试 4。",
+    min_data_in_leaf: "作用：每个叶子最少样本\\A建议默认值：20\\A调整建议：数据越少越要大；过拟合时调大。",
+    lambda_l2: "作用：L2正则\\A建议默认值：1~5，当前默认 3\\A调整建议：过拟合时调大，欠拟合明显时调小。",
+    feature_fraction: "作用：每棵树使用多少特征\\A建议默认值：1.0\\A调整建议：特征很多时可用 0.8~0.9；当前特征不多建议 1.0。",
+    bagging_fraction: "作用：每轮使用多少样本\\A建议默认值：0.85~0.9，当前默认 0.85\\A调整建议：数据多时可用，数据少不要太低。",
+    bagging_freq: "作用：bagging 频率\\A建议默认值：1\\A调整建议：一般固定 1；设为 0 表示关闭 bagging。",
+    monotone_constraints: "作用：单调约束\\A建议默认值：按字段配置，普通字段为 0\\A调整建议：PAC、加药单耗等字段可设 -1，表示该字段越大预测TP只能下降或不变。",
+    sample_weight_rule: "作用：样本权重规则\\A建议默认值：none\\A调整建议：高TP样本少时可选 high_target，提高高目标值样本权重。",
+  };
+  return (helps[name] || "").replaceAll("\\A", "\n");
+}
+
+function modelTrainingTargetKey(model) {
+  return model?.model_kind === "pac_flow_predict" ? "_training_target_pac_actual" : "_training_target_tp_out_next";
+}
+
+function modelTrainingConfig(model, columns) {
+  const keys = columns.map((column) => column.key);
+  const raw = model.training_config || {};
+  const featureColumns = Array.isArray(raw.feature_columns) ? raw.feature_columns.filter((key) => keys.includes(key)) : keys;
+  const rawConstraints = raw.monotone_constraints && typeof raw.monotone_constraints === "object" ? raw.monotone_constraints : {};
+  const constraints = Object.fromEntries(keys.map((key) => [key, [-1, 0, 1].includes(Number(rawConstraints[key])) ? Number(rawConstraints[key]) : 0]));
+  return {
+    target_column: modelTrainingTargetKey(model),
+    feature_columns: featureColumns.length ? featureColumns : keys,
+    prediction_step: raw.prediction_step ?? 1,
+    valid_ratio: raw.valid_ratio ?? 0.2,
+    split_method: raw.split_method || "time",
+    objective: raw.objective || "huber",
+    learning_rate: raw.learning_rate ?? 0.03,
+    num_boost_round: raw.num_boost_round ?? 500,
+    early_stopping_rounds: raw.early_stopping_rounds ?? 50,
+    num_leaves: raw.num_leaves ?? 7,
+    max_depth: raw.max_depth ?? 3,
+    min_data_in_leaf: raw.min_data_in_leaf ?? 20,
+    lambda_l2: raw.lambda_l2 ?? 3,
+    feature_fraction: raw.feature_fraction ?? 1,
+    bagging_fraction: raw.bagging_fraction ?? 0.85,
+    bagging_freq: raw.bagging_freq ?? 1,
+    monotone_constraints: constraints,
+    sample_weight_rule: raw.sample_weight_rule || "none",
+  };
+}
+
+function modelProjectPayload(form, model, columns) {
+  const payload = formObject(form);
+  payload.name = String(payload.name || "").trim();
+  payload.sample_interval_minutes = Number(payload.sample_interval_minutes || 5);
+  const featureColumns = [...form.querySelectorAll("[data-model-feature-column]:checked")].map((node) => node.dataset.modelFeatureColumn);
+  if (!featureColumns.length) return null;
+  const monotoneConstraints = {};
+  form.querySelectorAll("[data-model-monotone]").forEach((node) => {
+    monotoneConstraints[node.dataset.modelMonotone] = Number(node.value);
+  });
+  payload.training_config = {
+    target_column: modelTrainingTargetKey(model),
+    feature_columns: featureColumns,
+    prediction_step: Number(payload.prediction_step),
+    valid_ratio: Number(payload.valid_ratio),
+    split_method: payload.split_method,
+    objective: payload.objective,
+    learning_rate: Number(payload.learning_rate),
+    num_boost_round: Number(payload.num_boost_round),
+    early_stopping_rounds: Number(payload.early_stopping_rounds),
+    num_leaves: Number(payload.num_leaves),
+    max_depth: Number(payload.max_depth),
+    min_data_in_leaf: Number(payload.min_data_in_leaf),
+    lambda_l2: Number(payload.lambda_l2),
+    feature_fraction: Number(payload.feature_fraction),
+    bagging_fraction: Number(payload.bagging_fraction),
+    bagging_freq: Number(payload.bagging_freq),
+    monotone_constraints: monotoneConstraints,
+    sample_weight_rule: payload.sample_weight_rule,
+  };
+  [
+    "target_column",
+    "feature_columns",
+    "prediction_step",
+    "valid_ratio",
+    "split_method",
+    "objective",
+    "learning_rate",
+    "num_boost_round",
+    "early_stopping_rounds",
+    "num_leaves",
+    "max_depth",
+    "min_data_in_leaf",
+    "lambda_l2",
+    "feature_fraction",
+    "bagging_fraction",
+    "bagging_freq",
+    "monotone_constraints",
+    "sample_weight_rule",
+  ].forEach((key) => { delete payload[key]; });
+  return payload;
 }
 
 function modelSampleDigits(column) {
@@ -167,7 +372,7 @@ function modelSampleValue(value, digits = 4) {
 }
 
 function renderModelSampleTable(columns, samples, sampleTargetLabel) {
-  const targetHeaders = ["未来30分钟出水TP", "未来60分钟出水TP", "未来120分钟出水TP"];
+  const targetHeaders = [sampleTargetLabel];
   return `
     <div class="model-sample-table-wrap">
       <table class="table model-sample-table">
@@ -186,14 +391,21 @@ function renderModelSampleTable(columns, samples, sampleTargetLabel) {
 }
 
 function renderModelSampleTargets(sample) {
-  return ["_training_target_tp_out_30", "_training_target_tp_out_60", "_training_target_tp_out_120"]
+  const key = state.models.find((model) => model.id === state.selectedModelId)?.model_kind === "pac_flow_predict"
+    ? "_training_target_pac_actual"
+    : "_training_target_tp_out_next";
+  return [key]
     .map((key) => `<td>${modelSampleValue(sample.values?.[key], 4)}</td>`)
     .join("");
 }
 
+function modelTargetLabel(model) {
+  return model?.model_kind === "pac_flow_predict" ? "实际加药流量" : "下一次出水TP检测数据";
+}
+
 function wireModelWorkspace(detail) {
   const model = detail.model;
-  document.getElementById("modelConfigForm")?.addEventListener("submit", (event) => saveModelProject(event, model.id));
+  document.getElementById("modelConfigForm")?.addEventListener("submit", (event) => saveModelProject(event, model, detail.columns));
   document.getElementById("deleteModelBtn")?.addEventListener("click", () => deleteModelProject(model));
   document.getElementById("refreshModelSamplesBtn")?.addEventListener("click", async () => { await renderPage(); });
   document.getElementById("exportModelSamplesBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/samples.csv`; });
@@ -240,22 +452,25 @@ async function createModelProject(event) {
   payload.name = String(payload.name || "").trim();
   payload.dosing_point_id = Number(payload.dosing_point_id);
   payload.sample_interval_minutes = Number(payload.sample_interval_minutes || 5);
-  payload.model_kind = "tp_out_response";
+  payload.model_kind = payload.model_kind === "pac_flow_predict" ? "pac_flow_predict" : "tp_out_response";
   try {
     const res = await api("/api/models", { method: "POST", body: JSON.stringify(payload) });
     state.selectedModelId = res.model.id;
     state.editingNewModel = false;
-    showToast("训练模型已创建，可开始采集样本");
+    showToast("训练模型已创建，可开始导入样本");
     await renderPage();
   } catch (err) { showToast(`创建失败：${err.message}`); }
 }
 
-async function saveModelProject(event, modelId) {
+async function saveModelProject(event, model, columns) {
   event.preventDefault();
-  const payload = formObject(event.currentTarget);
-  payload.sample_interval_minutes = Number(payload.sample_interval_minutes);
+  const payload = modelProjectPayload(event.currentTarget, model, columns);
+  if (!payload) {
+    showToast("至少需要选择 1 个输入字段");
+    return;
+  }
   try {
-    await api(`/api/models/${modelId}`, { method: "PUT", body: JSON.stringify(payload) });
+    await api(`/api/models/${model.id}`, { method: "PUT", body: JSON.stringify(payload) });
     showToast("模型参数已保存");
     await renderPage();
   } catch (err) { showToast(`保存失败：${err.message}`); }

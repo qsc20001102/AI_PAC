@@ -20,11 +20,13 @@ from app.schemas import (
 )
 from app.services.audit import audit
 from app.services.model_training import (
-    TP_FORECAST_TARGETS,
+    SUPPORTED_MODEL_KINDS,
     current_model_feature_schema,
     decode_model_sample_csv_payload,
     import_model_csv_samples,
+    normalize_training_config,
     sync_model_feature_schema,
+    target_definition_for_kind,
     train_model_project_artifact,
 )
 from app.services.recommendation import recalculate_all
@@ -49,12 +51,13 @@ def create_model_project(payload: ModelProjectCreate) -> dict[str, Any]:
         if not point:
             raise HTTPException(422, "训练投加点不存在")
         schema = current_model_feature_schema(con, payload.dosing_point_id, payload.model_kind)
+        training_config = normalize_training_config(payload.training_config, payload.model_kind, schema)
         try:
             cur = con.execute(
                 """
                 INSERT INTO model_projects(
-                    name,dosing_point_id,model_kind,status,sample_interval_minutes,feature_schema_json,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?)
+                    name,dosing_point_id,model_kind,status,sample_interval_minutes,feature_schema_json,training_config_json,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     payload.name.strip(),
@@ -63,6 +66,7 @@ def create_model_project(payload: ModelProjectCreate) -> dict[str, Any]:
                     "draft",
                     payload.sample_interval_minutes,
                     dumps_json(schema),
+                    dumps_json(training_config),
                     now,
                     now,
                 ),
@@ -91,15 +95,17 @@ def model_project_detail_api(
 @router.put("/api/models/{model_id}")
 def update_model_project(model_id: int, payload: ModelProjectUpdate) -> dict[str, Any]:
     with db_session() as con:
-        model_project_or_404(con, model_id)
+        model = model_project_or_404(con, model_id)
+        schema = sync_model_feature_schema(con, model)
+        training_config = normalize_training_config(payload.training_config, model["model_kind"], schema)
         try:
             con.execute(
                 """
                 UPDATE model_projects
-                SET name=?, sample_interval_minutes=?, updated_at=?
+                SET name=?, sample_interval_minutes=?, training_config_json=?, updated_at=?
                 WHERE id=?
                 """,
-                (payload.name.strip(), payload.sample_interval_minutes, utc_now_iso(), model_id),
+                (payload.name.strip(), payload.sample_interval_minutes, dumps_json(training_config), utc_now_iso(), model_id),
             )
         except Exception as exc:
             if "UNIQUE" in str(exc).upper():
@@ -195,14 +201,13 @@ def export_model_samples(model_id: int) -> StreamingResponse:
         detail = model_project_detail(con, model_id)
     model = detail["model"]
     schema = model.get("feature_schema", [])
-    target_headers = [label for _name, _key, label, _horizon in TP_FORECAST_TARGETS]
+    _target_name, target_key, target_header = target_definition_for_kind(model["model_kind"])
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["时间", *[(item.get("tag_code") or item["label"]) for item in schema], *target_headers])
+    writer.writerow(["时间", *[(item.get("tag_code") or item["label"]) for item in schema], target_header])
     for row in detail["samples"]:
         values = row.get("values", {})
-        target_values = [model_csv_number(values.get(key)) for _name, key, _label, _horizon in TP_FORECAST_TARGETS]
-        writer.writerow([row["sample_time"], *[model_csv_number(values.get(item["key"])) for item in schema], *target_values])
+        writer.writerow([row["sample_time"], *[model_csv_number(values.get(item["key"])) for item in schema], model_csv_number(values.get(target_key))])
     return StreamingResponse(
         iter(["\ufeff" + buf.getvalue()]),
         media_type="text/csv; charset=utf-8-sig",
@@ -276,6 +281,10 @@ def download_model_artifact(model_id: int) -> StreamingResponse:
         content = dumps_json(artifact)
         media_type = "application/json; charset=utf-8"
         filename = artifact.get("file_name") or f"model_{model_id}_artifact.json"
+    elif artifact.get("format") in {"ai_pac_tp_forecast_v3", "ai_pac_flow_predict_v1"} and artifact.get("booster_model"):
+        content = dumps_json(artifact)
+        media_type = "application/json; charset=utf-8"
+        filename = artifact.get("file_name") or f"model_{model_id}_artifact.json"
     else:
         content = dumps_json(artifact)
         media_type = "application/json; charset=utf-8"
@@ -300,8 +309,8 @@ def model_project_or_404(con, model_id: int):
     row = con.execute("SELECT * FROM model_projects WHERE id=?", (model_id,)).fetchone()
     if not row:
         raise HTTPException(404, "训练模型不存在")
-    if row["model_kind"] != "tp_out_response":
-        raise HTTPException(410, "投加量预测模型已删除，请使用出水TP预测模型")
+    if row["model_kind"] not in SUPPORTED_MODEL_KINDS:
+        raise HTTPException(422, "模型类型不支持")
     return row
 
 
@@ -314,7 +323,7 @@ def model_project_rows(con) -> list[dict[str, Any]]:
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
         JOIN dosing_points dp ON dp.id=mp.dosing_point_id
-        WHERE mp.model_kind='tp_out_response'
+        WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict')
         ORDER BY mp.updated_at DESC, mp.id DESC
         """
     ).fetchall()
@@ -330,7 +339,7 @@ def model_project_summary_rows(con) -> list[dict[str, Any]]:
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
         JOIN dosing_points dp ON dp.id=mp.dosing_point_id
-        WHERE mp.model_kind='tp_out_response'
+        WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict')
         ORDER BY CASE mp.status WHEN 'published' THEN 0 WHEN 'recording' THEN 1 WHEN 'ready' THEN 2 ELSE 3 END,
                  mp.updated_at DESC,mp.id DESC
         """
@@ -374,6 +383,13 @@ def model_project_detail(
         raise HTTPException(404, "训练模型不存在")
     model = row_to_dict(row)
     model["feature_schema"] = sync_model_feature_schema(con, row)
+    raw_training_config = model.get("training_config", {})
+    model["training_config"] = normalize_training_config(raw_training_config, model["model_kind"], model["feature_schema"])
+    if raw_training_config != model["training_config"]:
+        con.execute(
+            "UPDATE model_projects SET training_config_json=?,updated_at=? WHERE id=?",
+            (dumps_json(model["training_config"]), utc_now_iso(), model_id),
+        )
     where = "WHERE model_project_id=?"
     params: list[Any] = [model_id]
     if sample_start:
@@ -388,7 +404,7 @@ def model_project_detail(
         params,
     ).fetchall():
         item = row_to_dict(sample)
-        item["target_value"] = item.pop("k_ai", None)
+        item["target_value"] = item.get("target_value", item.pop("k_ai", None))
         samples.append(item)
     return {
         "model": model,

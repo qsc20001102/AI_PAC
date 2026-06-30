@@ -94,18 +94,10 @@ async function renderProcessParams(main) {
               ${numberField("pac_min_l_h", "最小 L/h", current.pac_min_l_h, "0", "500", "0.01")}
               ${numberField("pac_max_l_h", "最大 L/h", current.pac_max_l_h, "0", "1000", "0.01")}
               ${numberField("calculation_interval_seconds", "计算周期(s)", current.calculation_interval_seconds, "5", "86400", "1")}
-              ${selectField("forecast_horizon_minutes", "出水TP预测时长(min)", [
-                { value: "30", label: "30 分钟" },
-                { value: "60", label: "60 分钟" },
-                { value: "120", label: "120 分钟" },
-              ], String(current.forecast_horizon_minutes ?? 120))}
             </div>
             <div class="process-source-title">单耗配置曲线</div>
-            <div id="unitDoseCurveRows" class="curve-editor">
-              ${curve.map((point, index) => curveRow(point, index)).join("")}
-            </div>
+            ${unitDoseCurveEditor(curve)}
             <div class="btn-row">
-              <button id="addCurvePointBtn" class="btn ghost" type="button">增加关键点</button>
               <button class="btn primary" type="submit">${icon("i-save")}保存工艺参数</button>
             </div>
           </form>
@@ -119,8 +111,7 @@ async function renderProcessParams(main) {
   }));
   document.getElementById("newProcessParamGroupBtn").addEventListener("click", createProcessParameterGroup);
   document.getElementById("deleteProcessParamGroupBtn").addEventListener("click", deleteProcessParameterGroup);
-  document.getElementById("addCurvePointBtn").addEventListener("click", addCurvePoint);
-  document.querySelectorAll("[data-curve-delete]").forEach((node) => node.addEventListener("click", deleteCurvePoint));
+  wireUnitDoseCurveEditor();
   document.getElementById("processParamGroupForm").addEventListener("submit", saveProcessParameterGroup);
 }
 
@@ -129,32 +120,259 @@ function defaultCurve() {
 }
 
 function normalizeCurve(curve) {
-  return Array.isArray(curve) && curve.length >= 2 ? curve : defaultCurve();
+  const points = (Array.isArray(curve) && curve.length >= 2 ? curve : defaultCurve())
+    .map((point) => ({
+      tp_mg_l: clampNumber(point.tp_mg_l, 0, 20, 0),
+      dose_mg_l: clampNumber(point.dose_mg_l, 0, 10000, 0),
+    }))
+    .filter((point) => Number.isFinite(point.tp_mg_l) && Number.isFinite(point.dose_mg_l));
+  return sortedUniqueCurve(points.length >= 2 ? points : defaultCurve());
 }
 
-function curveRow(point, index) {
+function unitDoseCurveEditor(curve) {
+  const points = normalizeCurve(curve);
   return `
-    <div class="curve-row" data-curve-row>
-      <label>出水TP<input name="curve_tp" type="number" min="0" max="20" step="0.001" value="${htmlEscape(point.tp_mg_l)}"></label>
-      <label>设定单耗<input name="curve_dose" type="number" min="0" max="10000" step="0.001" value="${htmlEscape(point.dose_mg_l)}"></label>
-      <button class="btn ghost" type="button" data-curve-delete="${index}">删除</button>
+    <div class="curve-editor" id="unitDoseCurveEditor">
+      <input id="unitDoseCurveData" name="curve_data" type="hidden" value="${htmlEscape(JSON.stringify(points))}">
+      <input id="unitDoseCurveSelected" type="hidden" value="0">
+      <div class="unit-dose-chart-wrap">
+        <svg id="unitDoseCurveSvg" class="unit-dose-chart" viewBox="0 0 760 320" role="img" aria-label="单耗配置曲线"></svg>
+      </div>
+      <div class="unit-dose-control-row">
+        <button class="btn ghost" id="addCurvePointBtn" type="button">增加关键点</button>
+        <button class="btn ghost" id="deleteCurvePointBtn" type="button">删除选中点</button>
+        <label>出水TP X<input id="curvePointTpInput" type="number" min="0" max="20" step="0.001"></label>
+        <label>设定单耗 Y<input id="curvePointDoseInput" type="number" min="0" max="10000" step="0.001"></label>
+        <span class="muted">点击图面增加关键点，拖动关键点或输入 X/Y 后折线会实时更新。</span>
+      </div>
+      <div id="unitDosePointList" class="unit-dose-point-list"></div>
     </div>
   `;
 }
 
-function addCurvePoint() {
-  const container = document.getElementById("unitDoseCurveRows");
-  container.insertAdjacentHTML("beforeend", curveRow({ tp_mg_l: "", dose_mg_l: "" }, container.querySelectorAll("[data-curve-row]").length));
-  container.querySelectorAll("[data-curve-delete]").forEach((node) => node.addEventListener("click", deleteCurvePoint));
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
 }
 
-function deleteCurvePoint(event) {
-  const rows = document.querySelectorAll("[data-curve-row]");
-  if (rows.length <= 2) {
+function sortedUniqueCurve(points) {
+  const unique = new Map();
+  points.forEach((point) => {
+    const tp = Number(point.tp_mg_l.toFixed(3));
+    unique.set(String(tp), { tp_mg_l: tp, dose_mg_l: Number(point.dose_mg_l.toFixed(3)) });
+  });
+  return [...unique.values()].sort((a, b) => a.tp_mg_l - b.tp_mg_l);
+}
+
+function curveEditorPoints() {
+  try {
+    return normalizeCurve(JSON.parse(document.getElementById("unitDoseCurveData")?.value || "[]"));
+  } catch {
+    return defaultCurve();
+  }
+}
+
+function setCurveEditorPoints(points, selectedIndex = null) {
+  const normalized = normalizeCurve(points);
+  const data = document.getElementById("unitDoseCurveData");
+  if (data) data.value = JSON.stringify(normalized);
+  const selected = document.getElementById("unitDoseCurveSelected");
+  if (selected) {
+    const current = selectedIndex == null ? Number(selected.value || 0) : selectedIndex;
+    selected.value = String(Math.min(normalized.length - 1, Math.max(0, current)));
+  }
+  renderUnitDoseCurve();
+}
+
+function selectedCurvePointIndex() {
+  const points = curveEditorPoints();
+  return Math.min(points.length - 1, Math.max(0, Number(document.getElementById("unitDoseCurveSelected")?.value || 0)));
+}
+
+function setSelectedCurvePoint(index) {
+  const selected = document.getElementById("unitDoseCurveSelected");
+  if (selected) selected.value = String(index);
+  renderUnitDoseCurve();
+}
+
+function curveChartBounds(points) {
+  const maxX = Math.max(1, ...points.map((point) => point.tp_mg_l));
+  const maxY = Math.max(100, ...points.map((point) => point.dose_mg_l));
+  return {
+    width: 760,
+    height: 320,
+    left: 56,
+    right: 20,
+    top: 18,
+    bottom: 42,
+    maxX: Math.min(20, Math.ceil(maxX * 1.15 * 1000) / 1000),
+    maxY: Math.min(10000, Math.ceil(maxY * 1.15 / 10) * 10),
+  };
+}
+
+function curvePointToSvg(point, bounds) {
+  const plotWidth = bounds.width - bounds.left - bounds.right;
+  const plotHeight = bounds.height - bounds.top - bounds.bottom;
+  return {
+    x: bounds.left + (point.tp_mg_l / bounds.maxX) * plotWidth,
+    y: bounds.top + plotHeight - (point.dose_mg_l / bounds.maxY) * plotHeight,
+  };
+}
+
+function svgToCurvePoint(x, y, bounds) {
+  const plotWidth = bounds.width - bounds.left - bounds.right;
+  const plotHeight = bounds.height - bounds.top - bounds.bottom;
+  const px = clampNumber(x, bounds.left, bounds.width - bounds.right, bounds.left);
+  const py = clampNumber(y, bounds.top, bounds.height - bounds.bottom, bounds.height - bounds.bottom);
+  return {
+    tp_mg_l: Number((((px - bounds.left) / plotWidth) * bounds.maxX).toFixed(3)),
+    dose_mg_l: Number((((bounds.top + plotHeight - py) / plotHeight) * bounds.maxY).toFixed(3)),
+  };
+}
+
+function renderUnitDoseCurve() {
+  const svg = document.getElementById("unitDoseCurveSvg");
+  if (!svg) return;
+  const points = curveEditorPoints();
+  const selectedIndex = selectedCurvePointIndex();
+  const bounds = curveChartBounds(points);
+  const svgPoints = points.map((point) => curvePointToSvg(point, bounds));
+  const xTicks = [0, bounds.maxX / 2, bounds.maxX];
+  const yTicks = [0, bounds.maxY / 2, bounds.maxY];
+  svg.innerHTML = `
+    <rect class="unit-dose-plot-bg" x="${bounds.left}" y="${bounds.top}" width="${bounds.width - bounds.left - bounds.right}" height="${bounds.height - bounds.top - bounds.bottom}"></rect>
+    ${xTicks.map((tick) => {
+      const x = curvePointToSvg({ tp_mg_l: tick, dose_mg_l: 0 }, bounds).x;
+      return `<line class="unit-dose-grid" x1="${x}" y1="${bounds.top}" x2="${x}" y2="${bounds.height - bounds.bottom}"></line><text class="unit-dose-axis-text" x="${x}" y="${bounds.height - 16}" text-anchor="middle">${fmtCompact(tick, 3)}</text>`;
+    }).join("")}
+    ${yTicks.map((tick) => {
+      const y = curvePointToSvg({ tp_mg_l: 0, dose_mg_l: tick }, bounds).y;
+      return `<line class="unit-dose-grid" x1="${bounds.left}" y1="${y}" x2="${bounds.width - bounds.right}" y2="${y}"></line><text class="unit-dose-axis-text" x="${bounds.left - 10}" y="${y + 4}" text-anchor="end">${fmtCompact(tick, 1)}</text>`;
+    }).join("")}
+    <polyline class="unit-dose-line" points="${svgPoints.map((point) => `${point.x},${point.y}`).join(" ")}"></polyline>
+    ${svgPoints.map((point, index) => `
+      <g class="unit-dose-point ${index === selectedIndex ? "selected" : ""}" data-curve-point="${index}" transform="translate(${point.x} ${point.y})">
+        <circle r="${index === selectedIndex ? 8 : 6}"></circle>
+        <text y="-12" text-anchor="middle">${fmtCompact(points[index].tp_mg_l, 3)}, ${fmtCompact(points[index].dose_mg_l, 1)}</text>
+      </g>
+    `).join("")}
+    <text class="unit-dose-axis-label" x="${bounds.width / 2}" y="${bounds.height - 2}" text-anchor="middle">出水TP (mg/L)</text>
+    <text class="unit-dose-axis-label" x="14" y="${bounds.height / 2}" text-anchor="middle" transform="rotate(-90 14 ${bounds.height / 2})">单耗 (mg/L)</text>
+  `;
+  renderCurvePointControls(points[selectedIndex], points, selectedIndex);
+  wireCurvePointEvents();
+}
+
+function renderCurvePointControls(point, points, selectedIndex) {
+  const tpInput = document.getElementById("curvePointTpInput");
+  const doseInput = document.getElementById("curvePointDoseInput");
+  if (tpInput && document.activeElement !== tpInput) tpInput.value = point ? point.tp_mg_l : "";
+  if (doseInput && document.activeElement !== doseInput) doseInput.value = point ? point.dose_mg_l : "";
+  const deleteButton = document.getElementById("deleteCurvePointBtn");
+  if (deleteButton) deleteButton.disabled = points.length <= 2;
+  const list = document.getElementById("unitDosePointList");
+  if (list) {
+    list.innerHTML = points.map((item, index) => `
+      <button class="unit-dose-point-chip ${index === selectedIndex ? "active" : ""}" data-curve-chip="${index}" type="button">
+        X ${fmtCompact(item.tp_mg_l, 3)} / Y ${fmtCompact(item.dose_mg_l, 1)}
+      </button>
+    `).join("");
+    list.querySelectorAll("[data-curve-chip]").forEach((node) => node.addEventListener("click", () => setSelectedCurvePoint(Number(node.dataset.curveChip))));
+  }
+}
+
+function wireCurvePointEvents() {
+  document.querySelectorAll("[data-curve-point]").forEach((node) => {
+    node.addEventListener("pointerdown", startCurvePointDrag);
+    node.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setSelectedCurvePoint(Number(node.dataset.curvePoint));
+    });
+  });
+}
+
+function updateSelectedCurvePoint(partial) {
+  const points = curveEditorPoints();
+  const index = selectedCurvePointIndex();
+  points[index] = { ...points[index], ...partial };
+  const targetPoint = points[index];
+  const sorted = sortedUniqueCurve(points);
+  const newIndex = sorted.findIndex((point) => point.tp_mg_l === Number(targetPoint.tp_mg_l.toFixed(3)));
+  setCurveEditorPoints(sorted, newIndex < 0 ? index : newIndex);
+}
+
+function addCurvePoint() {
+  const points = curveEditorPoints();
+  const index = selectedCurvePointIndex();
+  const left = points[index] || points[points.length - 1];
+  const right = points[index + 1] || null;
+  const newPoint = right
+    ? { tp_mg_l: (left.tp_mg_l + right.tp_mg_l) / 2, dose_mg_l: (left.dose_mg_l + right.dose_mg_l) / 2 }
+    : { tp_mg_l: Math.min(20, left.tp_mg_l + 0.1), dose_mg_l: left.dose_mg_l };
+  const sorted = sortedUniqueCurve([...points, newPoint]);
+  const newIndex = sorted.findIndex((point) => point.tp_mg_l === Number(newPoint.tp_mg_l.toFixed(3)));
+  setCurveEditorPoints(sorted, newIndex < 0 ? sorted.length - 1 : newIndex);
+}
+
+function addCurvePointFromSvg(event) {
+  if (event.target.closest("[data-curve-point]")) return;
+  const svg = document.getElementById("unitDoseCurveSvg");
+  if (!svg) return;
+  const rect = svg.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) / rect.width) * 760;
+  const y = ((event.clientY - rect.top) / rect.height) * 320;
+  const points = curveEditorPoints();
+  const newPoint = svgToCurvePoint(x, y, curveChartBounds(points));
+  const sorted = sortedUniqueCurve([...points, newPoint]);
+  const newIndex = sorted.findIndex((point) => point.tp_mg_l === Number(newPoint.tp_mg_l.toFixed(3)));
+  setCurveEditorPoints(sorted, newIndex < 0 ? sorted.length - 1 : newIndex);
+}
+
+function deleteCurvePoint() {
+  const points = curveEditorPoints();
+  if (points.length <= 2) {
     showToast("单耗曲线至少保留 2 个关键点");
     return;
   }
-  event.currentTarget.closest("[data-curve-row]")?.remove();
+  const index = selectedCurvePointIndex();
+  points.splice(index, 1);
+  setCurveEditorPoints(points, Math.min(index, points.length - 1));
+}
+
+function startCurvePointDrag(event) {
+  event.preventDefault();
+  const svg = document.getElementById("unitDoseCurveSvg");
+  if (!svg) return;
+  const index = Number(event.currentTarget.dataset.curvePoint);
+  setSelectedCurvePoint(index);
+  const move = (moveEvent) => {
+    const rect = svg.getBoundingClientRect();
+    const x = ((moveEvent.clientX - rect.left) / rect.width) * 760;
+    const y = ((moveEvent.clientY - rect.top) / rect.height) * 320;
+    const points = curveEditorPoints();
+    const bounds = curveChartBounds(points);
+    updateSelectedCurvePoint(svgToCurvePoint(x, y, bounds));
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
+function wireUnitDoseCurveEditor() {
+  renderUnitDoseCurve();
+  document.getElementById("unitDoseCurveSvg")?.addEventListener("click", addCurvePointFromSvg);
+  document.getElementById("addCurvePointBtn")?.addEventListener("click", addCurvePoint);
+  document.getElementById("deleteCurvePointBtn")?.addEventListener("click", deleteCurvePoint);
+  document.getElementById("curvePointTpInput")?.addEventListener("input", (event) => {
+    updateSelectedCurvePoint({ tp_mg_l: clampNumber(event.target.value, 0, 20, 0) });
+  });
+  document.getElementById("curvePointDoseInput")?.addEventListener("input", (event) => {
+    updateSelectedCurvePoint({ dose_mg_l: clampNumber(event.target.value, 0, 10000, 0) });
+  });
 }
 
 function metricMini(p) {
@@ -279,10 +497,7 @@ function formObject(form) {
 }
 
 function processParameterGroupPayload(form) {
-  const curve = Array.from(form.querySelectorAll("[data-curve-row]")).map((row) => ({
-    tp_mg_l: Number(row.querySelector('[name="curve_tp"]').value),
-    dose_mg_l: Number(row.querySelector('[name="curve_dose"]').value),
-  }));
+  const curve = curveEditorPoints();
   return {
     name: String(form.elements.name.value || "").trim(),
     tp_target_mg_l: Number(form.elements.tp_target_mg_l.value),
@@ -291,7 +506,6 @@ function processParameterGroupPayload(form) {
     pac_min_l_h: Number(form.elements.pac_min_l_h.value),
     pac_max_l_h: Number(form.elements.pac_max_l_h.value),
     calculation_interval_seconds: Number(form.elements.calculation_interval_seconds.value),
-    forecast_horizon_minutes: Number(form.elements.forecast_horizon_minutes.value),
     unit_dose_curve: curve,
   };
 }
@@ -309,7 +523,6 @@ async function createProcessParameterGroup() {
         pac_min_l_h: 0,
         pac_max_l_h: 60,
         calculation_interval_seconds: 60,
-        forecast_horizon_minutes: 120,
         unit_dose_curve: defaultCurve(),
       }),
     });

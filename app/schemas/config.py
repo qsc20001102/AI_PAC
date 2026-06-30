@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, Field
 
 
@@ -19,7 +17,6 @@ class ProcessParameterGroupIn(BaseModel):
     calculation_interval_seconds: int = Field(ge=5, le=86400)
     pac_density_kg_l: float = Field(gt=0, le=2)
     unit_dose_curve: list[UnitDoseCurvePoint] = Field(min_length=2)
-    forecast_horizon_minutes: Literal[30, 60, 120] = 120
 
 
 class SettingUpdate(BaseModel):
