@@ -24,7 +24,7 @@ from app.database import (
     init_schema,
     utc_now_iso,
 )
-from app.services.collection_runtime import collection_loop, model_recording_loop
+from app.services.collection_runtime import collection_loop
 from app.services.plc import disconnect_client
 from app.services.plc_devices import plc_client_store
 from app.services.recommendation import recalculate_all
@@ -35,9 +35,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 
 app = FastAPI(
-    title="AI 智能 PAC 除磷加药平台",
+    title="智能污水除磷药系统",
     version="0.1.0",
-    description="本地部署的 PAC 除磷建议加药系统，输出可解释、可限幅、可回退的建议 L/h。",
+    description="本地部署的智能污水除磷药系统，输出可解释、可限幅、可回退的建议 L/h。",
 )
 
 app.include_router(health_router)
@@ -58,7 +58,6 @@ def startup() -> None:
     init_schema()
     plc_client_store().clear()
     app.state.collector_task = asyncio.create_task(collection_loop())
-    app.state.model_recording_task = asyncio.create_task(model_recording_loop())
     with db_session() as con:
         ensure_seed_data(con)
         con.execute(
@@ -74,7 +73,7 @@ def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    for task_name in ("collector_task", "model_recording_task"):
+    for task_name in ("collector_task",):
         task = getattr(app.state, task_name, None)
         if task:
             task.cancel()

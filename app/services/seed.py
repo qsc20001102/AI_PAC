@@ -5,7 +5,7 @@ import random
 import sqlite3
 from datetime import datetime, timedelta
 
-from app.database import create_time_range, dumps_json, table_count, utc_now_iso
+from app.database import DEFAULT_UNIT_DOSE_CURVE, backfill_process_source_tags, create_time_range, dumps_json, ensure_learning_source_tags, table_count, utc_now_iso
 
 
 def ensure_seed_data(con: sqlite3.Connection) -> None:
@@ -34,9 +34,9 @@ def ensure_seed_data(con: sqlite3.Connection) -> None:
     )
 
     points = [
-        (1, 1, "1#高效池 PAC", "PAC_1", 1, "line", "po4_priority", "shared_out", 1.00, 1, 1),
-        (2, 2, "2#高效池 PAC", "PAC_2", 1, "line", "po4_priority", "shared_out", 0.92, 2, 1),
-        (3, 3, "深度处理 PAC", "PAC_DEEP", 1, "line", "po4_priority", "line_out", 0.70, 3, 0),
+        (1, 1, "1#高效池 PAC", "PAC_1", 1, "line", "po4", "shared_out", 1.00, 1, 1),
+        (2, 2, "2#高效池 PAC", "PAC_2", 1, "line", "po4", "shared_out", 0.92, 2, 1),
+        (3, 3, "深度处理 PAC", "PAC_DEEP", 1, "line", "po4", "line_out", 0.70, 3, 0),
         (4, 4, "备用投加点", "PAC_STANDBY", 1, "manual", "manual", "manual", 0.30, 4, 0),
     ]
     con.executemany(
@@ -65,21 +65,38 @@ def ensure_seed_data(con: sqlite3.Connection) -> None:
     )
 
     control_configs = [
-        (1, 1, 0.18, 0.16, 0.30, 6.0, 80.0, 0.15, 3.5, 2.0, 55, 0.28, 0.80, 1.30, 120, now_iso),
-        (2, 2, 0.18, 0.16, 0.30, 5.0, 70.0, 0.15, 3.0, 2.0, 60, 0.24, 0.82, 1.25, 120, now_iso),
-        (3, 3, 0.16, 0.14, 0.30, 4.0, 55.0, 0.12, 2.5, 1.5, 45, 0.22, 0.85, 1.22, 90, now_iso),
-        (4, 4, 0.18, 0.16, 0.30, 0.0, 40.0, 0.20, 3.0, 1.5, 60, 0.20, 0.85, 1.20, 60, now_iso),
+        (1, 1, 0.18, 0.16, 0.30, 0.7, 6.0, 80.0, 0.15, 3.5, 2.0, 0, 55, 0.28, 0.80, 1.30, 120, now_iso),
+        (2, 2, 0.18, 0.16, 0.30, 0.7, 5.0, 70.0, 0.15, 3.0, 2.0, 0, 60, 0.24, 0.82, 1.25, 120, now_iso),
+        (3, 3, 0.16, 0.14, 0.30, 0.7, 4.0, 55.0, 0.12, 2.5, 1.5, 0, 45, 0.22, 0.85, 1.22, 90, now_iso),
+        (4, 4, 0.18, 0.16, 0.30, 0.7, 0.0, 40.0, 0.20, 3.0, 1.5, 0, 60, 0.20, 0.85, 1.20, 60, now_iso),
     ]
     con.executemany(
         """
         INSERT INTO control_configs(
-            id,dosing_point_id,tp_target_mg_l,tp_safe_target_mg_l,tp_limit_mg_l,pac_min_l_h,pac_max_l_h,
-            single_step_change_ratio,max_increase_l_h_per_min,max_decrease_l_h_per_min,lag_minutes,
+            id,dosing_point_id,tp_target_mg_l,tp_safe_target_mg_l,tp_limit_mg_l,biochemical_phosphorus_removal_efficiency,
+            pac_min_l_h,pac_max_l_h,
+            single_step_change_ratio,max_increase_l_h_per_min,max_decrease_l_h_per_min,inflow_delay_minutes,lag_minutes,
             feedback_kp,feedback_min,feedback_max,feedback_window_minutes,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         control_configs,
     )
+    process_groups = [
+        (1, "默认工艺参数", 0.18, 0.30, 0.30, 1.20, dumps_json(DEFAULT_UNIT_DOSE_CURVE), 120, 0.7, 0.0, 80.0, 60, 0, 60, 0.0, 1.0, 1.0, 60, now_iso),
+        (2, "深度处理工艺参数", 0.16, 0.30, 0.30, 1.20, dumps_json(DEFAULT_UNIT_DOSE_CURVE), 120, 0.7, 0.0, 60.0, 60, 0, 60, 0.0, 1.0, 1.0, 60, now_iso),
+    ]
+    con.executemany(
+        """
+        INSERT INTO process_parameter_groups(
+            id,name,tp_target_mg_l,tp_limit_mg_l,tp_upper_mg_l,pac_density_kg_l,unit_dose_curve_json,
+            forecast_horizon_minutes,biochemical_phosphorus_removal_efficiency,pac_min_l_h,pac_max_l_h,calculation_interval_seconds,
+            inflow_delay_minutes,lag_minutes,feedback_kp,feedback_min,feedback_max,feedback_window_minutes,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        process_groups,
+    )
+    con.execute("UPDATE dosing_points SET process_parameter_group_id=1 WHERE id IN (1,2,4)")
+    con.execute("UPDATE dosing_points SET process_parameter_group_id=2 WHERE id=3")
 
     tag_rows: list[tuple] = []
     tag_id = 1
@@ -92,6 +109,14 @@ def ensure_seed_data(con: sqlite3.Connection) -> None:
             ("PH", "pH", "", 10, 60, 3, 11),
             ("PAC_ACTUAL", "PAC 实际", "L/h", 10, 60, 0, 200),
             ("TURBIDITY", "浊度", "NTU", 30, 120, 0, 300),
+            ("BIO_ORP1", "生化池ORP1", "mV", 10, 60, -1000, 1000),
+            ("BIO_ORP2", "生化池ORP2", "mV", 10, 60, -1000, 1000),
+            ("BIO_ORP3", "生化池ORP3", "mV", 10, 60, -1000, 1000),
+            ("BIO_ORP4", "生化池ORP4", "mV", 10, 60, -1000, 1000),
+            ("BIO_DO1", "生化池DO1", "mg/L", 10, 60, 0, 20),
+            ("BIO_DO2", "生化池DO2", "mg/L", 10, 60, 0, 20),
+            ("BIO_MLSS1", "生化池MLSS1", "mg/L", 30, 120, 0, 20000),
+            ("BIO_MLSS2", "生化池MLSS2", "mg/L", 30, 120, 0, 20000),
         ]:
             source = "manual" if point_id == 4 else "s7comm"
             tag_rows.append((tag_id, point_id, f"{prefix}_{tag_type}", tag_type, name, unit, stale, max_stale, min_v, max_v, source, 1))
@@ -105,6 +130,8 @@ def ensure_seed_data(con: sqlite3.Connection) -> None:
         """,
         tag_rows,
     )
+    backfill_process_source_tags(con)
+    ensure_learning_source_tags(con)
 
     con.execute(
         """
@@ -336,10 +363,10 @@ def _insert_samples(con: sqlite3.Connection, now: datetime) -> None:
     }
 
     base = {
-        1: {"prefix": "PAC1", "q": 1235, "po4": 0.32, "tp_before": 0.46, "tp_out": 0.18, "ph": 7.32, "pac": 35.9, "turb": 14},
-        2: {"prefix": "PAC2", "q": 988, "po4": 0.41, "tp_before": 0.53, "tp_out": 0.24, "ph": 7.28, "pac": 28.4, "turb": 18},
-        3: {"prefix": "DEEP", "q": 512, "po4": 0.58, "tp_before": 0.66, "tp_out": 0.31, "ph": 7.14, "pac": 15.0, "turb": 11},
-        4: {"prefix": "STBY", "q": 0, "po4": 0.0, "tp_before": 0.0, "tp_out": 0.0, "ph": 0.0, "pac": 0.0, "turb": 0.0},
+        1: {"prefix": "PAC1", "q": 1235, "po4": 0.32, "tp_before": 0.46, "tp_out": 0.18, "ph": 7.32, "pac": 35.9, "turb": 14, "orp": -55, "do": 2.1, "mlss": 3200},
+        2: {"prefix": "PAC2", "q": 988, "po4": 0.41, "tp_before": 0.53, "tp_out": 0.24, "ph": 7.28, "pac": 28.4, "turb": 18, "orp": -72, "do": 1.8, "mlss": 3500},
+        3: {"prefix": "DEEP", "q": 512, "po4": 0.58, "tp_before": 0.66, "tp_out": 0.31, "ph": 7.14, "pac": 15.0, "turb": 11, "orp": -40, "do": 2.5, "mlss": 3000},
+        4: {"prefix": "STBY", "q": 0, "po4": 0.0, "tp_before": 0.0, "tp_out": 0.0, "ph": 0.0, "pac": 0.0, "turb": 0.0, "orp": 0, "do": 0, "mlss": 0},
     }
     samples: list[tuple] = []
     for idx, ts in enumerate(create_time_range(6, 5)):
@@ -357,6 +384,9 @@ def _insert_samples(con: sqlite3.Connection, now: datetime) -> None:
             ph = item["ph"] + rng.uniform(-0.08, 0.08)
             actual = item["pac"] + math.sin(phase / 3) * 1.4 + rng.uniform(-0.9, 0.9)
             turb = item["turb"] + rng.uniform(-2.0, 2.0)
+            orp = item["orp"] + math.sin(phase / 2) * 12 + rng.uniform(-8, 8)
+            dissolved_oxygen = max(item["do"] + math.cos(phase / 3) * 0.25 + rng.uniform(-0.15, 0.15), 0)
+            mlss = max(item["mlss"] + math.sin(phase / 4) * 180 + rng.uniform(-90, 90), 0)
             values = {
                 "Q": max(q, 0),
                 "PO4_P": po4,
@@ -365,6 +395,14 @@ def _insert_samples(con: sqlite3.Connection, now: datetime) -> None:
                 "PH": ph,
                 "PAC_ACTUAL": max(actual, 0),
                 "TURBIDITY": max(turb, 0),
+                "BIO_ORP1": orp,
+                "BIO_ORP2": orp + rng.uniform(-10, 10),
+                "BIO_ORP3": orp + rng.uniform(-14, 14),
+                "BIO_ORP4": orp + rng.uniform(-18, 18),
+                "BIO_DO1": dissolved_oxygen,
+                "BIO_DO2": max(dissolved_oxygen + rng.uniform(-0.25, 0.25), 0),
+                "BIO_MLSS1": mlss,
+                "BIO_MLSS2": max(mlss + rng.uniform(-160, 160), 0),
             }
             for tag_type, value in values.items():
                 tag = tag_map[f"{prefix}_{tag_type}"]
@@ -382,14 +420,14 @@ def _insert_samples(con: sqlite3.Connection, now: datetime) -> None:
 
     # Latest edge cases visible on the overview.
     stale_ts = now - timedelta(minutes=42)
-    for tag_type in ["Q", "PO4_P", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL", "TURBIDITY"]:
+    for tag_type in ["Q", "PO4_P", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL", "TURBIDITY", "BIO_ORP1", "BIO_ORP2", "BIO_ORP3", "BIO_ORP4", "BIO_DO1", "BIO_DO2", "BIO_MLSS1", "BIO_MLSS2"]:
         tag = tag_map[f"DEEP_{tag_type}"]
-        value = {"Q": 512, "PO4_P": 0.58, "TP_BEFORE": 0.66, "TP_OUT": 0.31, "PH": 7.14, "PAC_ACTUAL": 15.2, "TURBIDITY": 12}.get(tag_type, 0)
+        value = {"Q": 512, "PO4_P": 0.58, "TP_BEFORE": 0.66, "TP_OUT": 0.31, "PH": 7.14, "PAC_ACTUAL": 15.2, "TURBIDITY": 12, "BIO_ORP1": -40, "BIO_ORP2": -45, "BIO_ORP3": -38, "BIO_ORP4": -50, "BIO_DO1": 2.5, "BIO_DO2": 2.3, "BIO_MLSS1": 3000, "BIO_MLSS2": 3120}.get(tag_type, 0)
         samples.append((tag["id"], value, tag["unit"], stale_ts.isoformat(), stale_ts.isoformat(), "good", "s7comm"))
 
-    for tag_type in ["Q", "PO4_P", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL", "TURBIDITY"]:
+    for tag_type in ["Q", "PO4_P", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL", "TURBIDITY", "BIO_ORP1", "BIO_ORP2", "BIO_ORP3", "BIO_ORP4", "BIO_DO1", "BIO_DO2", "BIO_MLSS1", "BIO_MLSS2"]:
         tag = tag_map[f"STBY_{tag_type}"]
-        value = 0 if tag_type != "PH" else 7.2
+        value = 7.2 if tag_type == "PH" else (2 if tag_type.startswith("BIO_DO") else (3000 if tag_type.startswith("BIO_MLSS") else 0))
         samples.append((tag["id"], value, tag["unit"], now.isoformat(), now.isoformat(), "good", "manual"))
 
     con.executemany(

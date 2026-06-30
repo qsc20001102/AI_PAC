@@ -252,7 +252,6 @@ def delete_collection_tag(tag_id: int) -> dict[str, Any]:
         tag = con.execute("SELECT * FROM sensor_tags WHERE id=?", (tag_id,)).fetchone()
         if not tag:
             raise HTTPException(404, "采集点不存在")
-        con.execute("DELETE FROM manual_samples WHERE tag_id=?", (tag_id,))
         con.execute("DELETE FROM sensor_samples WHERE tag_id=?", (tag_id,))
         con.execute("DELETE FROM sensor_tags WHERE id=?", (tag_id,))
         audit(con, "local", "delete", "collection_tag", str(tag_id), row_to_dict(tag))
@@ -336,21 +335,18 @@ def purge_history_data(payload: HistoryPurgeIn) -> dict[str, Any]:
     cutoff = (datetime.now() - timedelta(days=payload.days)).replace(microsecond=0).isoformat()
     with db_session() as con:
         sensor_count = int(con.execute("SELECT COUNT(*) FROM sensor_samples WHERE sample_time<?", (cutoff,)).fetchone()[0])
-        manual_count = int(con.execute("SELECT COUNT(*) FROM manual_samples WHERE sample_time<?", (cutoff,)).fetchone()[0])
         con.execute("DELETE FROM sensor_samples WHERE sample_time<?", (cutoff,))
-        con.execute("DELETE FROM manual_samples WHERE sample_time<?", (cutoff,))
         audit(
             con,
             "local",
             "purge",
             "history_data",
             cutoff,
-            {"days": payload.days, "cutoff": cutoff, "sensor_samples_deleted": sensor_count, "manual_samples_deleted": manual_count},
+            {"days": payload.days, "cutoff": cutoff, "sensor_samples_deleted": sensor_count},
         )
     return {
         "ok": True,
         "days": payload.days,
         "cutoff": cutoff,
         "sensor_samples_deleted": sensor_count,
-        "manual_samples_deleted": manual_count,
     }

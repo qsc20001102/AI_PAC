@@ -30,7 +30,7 @@ def trends(
             if q_points is not None:
                 series["Q"] = {"name": "参与计算流量", "unit": "m3/h", "points": q_points}
             for field, logical_type, logical_name, default_unit in PROCESS_SOURCE_MAP:
-                if logical_type in {"ZONE_Q", "REFLUX_Q1", "REFLUX_Q2"}:
+                if logical_type in {"REFLUX_Q1", "REFLUX_Q2"}:
                     continue
                 tag_id = point[field]
                 if tag_id is None:
@@ -44,7 +44,7 @@ def trends(
                 (dosing_point_id,),
             ).fetchall()
             for tag in legacy_tags:
-                if tag["tag_type"] in {"Q", "PO4_P", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL"}:
+                if tag["tag_type"] in {"Q", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL"}:
                     tags.append((tag, tag["tag_type"], tag["tag_code"], tag["unit"]))
         for tag, logical_type, logical_name, default_unit in tags:
             rows = con.execute(
@@ -95,14 +95,10 @@ def tag_series_rows(con, tag_id: int | None, since: str) -> list[dict[str, Any]]
 
 
 def effective_flow_series(con, point: Any, since: str) -> list[dict[str, Any]] | None:
-    if point["zone_flow_tag_id"] is not None:
-        base_rows = tag_series_rows(con, point["zone_flow_tag_id"], since)
-        weight = 1.0
-    elif point["in_flow_tag_id"] is not None:
-        base_rows = tag_series_rows(con, point["in_flow_tag_id"], since)
-        weight = float(point["in_flow_weight"] if point["in_flow_weight"] is not None else 1.0)
-    else:
+    if point["in_flow_tag_id"] is None:
         return None
+    base_rows = tag_series_rows(con, point["in_flow_tag_id"], since)
+    weight = float(point["in_flow_weight"] if point["in_flow_weight"] is not None else 1.0)
     if not base_rows:
         return []
     points = []

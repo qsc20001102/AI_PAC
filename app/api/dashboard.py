@@ -36,14 +36,12 @@ def dashboard() -> dict[str, Any]:
             ).fetchall()
         ]
         plc = plc_device_rows(con)
-        models = [row_to_dict(row) for row in con.execute("SELECT * FROM model_versions ORDER BY id DESC").fetchall()]
         training_models = model_project_summary_rows(con)
         quality = data_quality_rows(con)
     return {
         "recommendations": recs,
         "alarms": alarms,
         "plc": plc,
-        "models": models,
         "training_models": training_models,
         "data_quality": quality,
         "server_time": utc_now_iso(),

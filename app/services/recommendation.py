@@ -3,27 +3,32 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import lightgbm as lgb
 import numpy as np
-from app.database import clear_alarm, dumps_json, loads_json, parse_dt, upsert_alarm, utc_now_iso
 
+from app.database import DEFAULT_UNIT_DOSE_CURVE, clear_alarm, dumps_json, loads_json, parse_dt, upsert_alarm, utc_now_iso
 
-AL_FRACTION_IN_AL2O3 = 54 / 102
-AL_P_MASS_RATIO = 27 / 31
 
 PROCESS_SOURCE_MAP = [
     ("in_flow_tag_id", "IN_Q", "进水流量", "m3/h"),
     ("in_tp_tag_id", "TP_BEFORE", "进水TP", "mg/L"),
+    ("in_ph_tag_id", "PH", "进水PH", ""),
     ("out_flow_tag_id", "OUT_Q", "出水流量", "m3/h"),
     ("out_tp_tag_id", "TP_OUT", "出水TP", "mg/L"),
-    ("zone_flow_tag_id", "ZONE_Q", "分区流量", "m3/h"),
     ("reflux_flow_1_tag_id", "REFLUX_Q1", "回流流量1", "m3/h"),
     ("reflux_flow_2_tag_id", "REFLUX_Q2", "回流流量2", "m3/h"),
-    ("po4_tag_id", "PO4_P", "正磷酸盐", "mg/L"),
     ("pac_flow_tag_id", "PAC_ACTUAL", "加药流量", "L/h"),
+    ("bio_orp1_tag_id", "BIO_ORP1", "生化池ORP1", "mV"),
+    ("bio_orp2_tag_id", "BIO_ORP2", "生化池ORP2", "mV"),
+    ("bio_orp3_tag_id", "BIO_ORP3", "生化池ORP3", "mV"),
+    ("bio_orp4_tag_id", "BIO_ORP4", "生化池ORP4", "mV"),
+    ("bio_do1_tag_id", "BIO_DO1", "生化池DO1", "mg/L"),
+    ("bio_do2_tag_id", "BIO_DO2", "生化池DO2", "mg/L"),
+    ("bio_mlss1_tag_id", "BIO_MLSS1", "生化池MLSS1", "mg/L"),
+    ("bio_mlss2_tag_id", "BIO_MLSS2", "生化池MLSS2", "mg/L"),
 ]
 
 
@@ -49,45 +54,33 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def classify_sample(tag: sqlite3.Row, sample: sqlite3.Row | None, now: datetime | None = None) -> DataPoint:
+def valid_for_calc(point: DataPoint | None) -> bool:
+    return bool(point and point.value is not None and point.status == "fresh")
+
+
+def classify_sample(tag: sqlite3.Row, sample: sqlite3.Row | dict[str, Any] | None, now: datetime | None = None) -> DataPoint:
     now = now or datetime.now().replace(microsecond=0)
     if sample is None:
-        return DataPoint(
-            tag_id=tag["id"],
-            tag_code=tag["tag_code"],
-            tag_type=tag["tag_type"],
-            name=tag["tag_code"],
-            unit=tag["unit"],
-            value=None,
-            sample_time=None,
-            receive_time=None,
-            quality="missing",
-            source=tag["source"],
-            status="stale",
-            age_minutes=None,
-            stale_minutes=tag["stale_minutes"],
-            max_stale_minutes=tag["max_stale_minutes"],
-        )
+        return DataPoint(tag["id"], tag["tag_code"], tag["tag_type"], tag["tag_code"], tag["unit"], None, None, None, "missing", tag["source"], "missing", None, tag["stale_minutes"], tag["max_stale_minutes"])
 
-    value = float(sample["value"])
+    try:
+        value = float(sample["value"])
+    except (TypeError, ValueError):
+        value = None
     sample_time = parse_dt(sample["sample_time"])
     age = (now - sample_time).total_seconds() / 60 if sample_time else None
+    source = str(sample["source"] or "")
+    quality = str(sample["quality"] or "unknown")
     status = "fresh"
-    quality = sample["quality"]
-
-    if quality != "good":
+    if value is None or source == "manual" or quality != "good":
         status = "bad"
     elif tag["min_value"] is not None and value < tag["min_value"]:
         status = "bad"
     elif tag["max_value"] is not None and value > tag["max_value"]:
         status = "bad"
     elif age is None:
-        status = "stale"
-    elif age <= tag["stale_minutes"]:
-        status = "manual" if sample["source"] == "manual" else "fresh"
-    elif age <= tag["max_stale_minutes"]:
-        status = "manual" if sample["source"] == "manual" else "delayed"
-    else:
+        status = "missing"
+    elif age > tag["stale_minutes"]:
         status = "stale"
 
     return DataPoint(
@@ -100,7 +93,7 @@ def classify_sample(tag: sqlite3.Row, sample: sqlite3.Row | None, now: datetime 
         sample_time=sample["sample_time"],
         receive_time=sample["receive_time"],
         quality=quality,
-        source=sample["source"],
+        source=source,
         status=status,
         age_minutes=round(age, 1) if age is not None else None,
         stale_minutes=tag["stale_minutes"],
@@ -128,22 +121,7 @@ def datapoint_to_dict(point: DataPoint) -> dict[str, Any]:
 
 
 def with_logical_type(point: DataPoint, tag_type: str, name: str, unit: str) -> DataPoint:
-    return DataPoint(
-        tag_id=point.tag_id,
-        tag_code=point.tag_code,
-        tag_type=tag_type,
-        name=name or point.name,
-        unit=point.unit or unit,
-        value=point.value,
-        sample_time=point.sample_time,
-        receive_time=point.receive_time,
-        quality=point.quality,
-        source=point.source,
-        status=point.status,
-        age_minutes=point.age_minutes,
-        stale_minutes=point.stale_minutes,
-        max_stale_minutes=point.max_stale_minutes,
-    )
+    return DataPoint(point.tag_id, point.tag_code, tag_type, name or point.name, point.unit or unit, point.value, point.sample_time, point.receive_time, point.quality, point.source, point.status, point.age_minutes, point.stale_minutes, point.max_stale_minutes)
 
 
 def latest_data_for_tag(
@@ -153,25 +131,23 @@ def latest_data_for_tag(
     logical_name: str,
     default_unit: str,
     now: datetime | None = None,
+    at_time: datetime | None = None,
 ) -> DataPoint | None:
     tag = con.execute("SELECT * FROM sensor_tags WHERE id=? AND enabled=1", (tag_id,)).fetchone()
     if not tag:
         return None
+    target_time = at_time or now
     history_sample = con.execute(
         """
         SELECT * FROM sensor_samples
-        WHERE tag_id=?
+        WHERE tag_id=? AND (? IS NULL OR sample_time<=?)
         ORDER BY sample_time DESC
         LIMIT 1
         """,
-        (tag["id"],),
+        (tag_id, target_time.isoformat() if target_time else None, target_time.isoformat() if target_time else None),
     ).fetchone()
-
-    # PLC polling keeps the newest reading on the tag.  History is intentionally
-    # written less frequently, so using only sensor_samples would make a healthy
-    # point look stale between history writes.
     realtime_sample: dict[str, Any] | None = None
-    if tag["last_value_text"] is not None and tag["last_read_at"] is not None:
+    if at_time is None and tag["last_value_text"] is not None and tag["last_read_at"] is not None:
         try:
             realtime_sample = {
                 "value": float(tag["last_value_text"]),
@@ -181,261 +157,227 @@ def latest_data_for_tag(
                 "source": tag["source"],
             }
         except (TypeError, ValueError):
-            # Non-numeric collection points do not participate in this numeric
-            # recommendation path. Keep the historical fallback for them.
             realtime_sample = None
-
-    sample: sqlite3.Row | dict[str, Any] | None = history_sample
-    if realtime_sample:
-        realtime_time = parse_dt(realtime_sample["sample_time"])
-        history_time = parse_dt(history_sample["sample_time"]) if history_sample else None
-        if history_time is None or (realtime_time is not None and realtime_time >= history_time):
-            sample = realtime_sample
-    return with_logical_type(classify_sample(tag, sample, now), logical_type, logical_name, default_unit)
+    sample: sqlite3.Row | dict[str, Any] | None = realtime_sample or history_sample
+    return with_logical_type(classify_sample(tag, sample, at_time or now), logical_type, logical_name, default_unit)
 
 
-def computed_flow_point(base: DataPoint, value: float, status: str, sample_time: str | None) -> DataPoint:
-    return DataPoint(
-        tag_id=base.tag_id,
-        tag_code=base.tag_code,
-        tag_type="Q",
-        name="参与计算流量",
-        unit=base.unit or "m3/h",
-        value=value,
-        sample_time=sample_time or base.sample_time,
-        receive_time=base.receive_time,
-        quality="good" if status in {"fresh", "manual"} else "bad",
-        source="computed",
-        status=status,
-        age_minutes=base.age_minutes,
-        stale_minutes=base.stale_minutes,
-        max_stale_minutes=base.max_stale_minutes,
-    )
-
-
-def latest_sample_time(points: list[DataPoint]) -> str | None:
-    values = [point.sample_time for point in points if point.sample_time]
-    return max(values) if values else None
+def computed_flow_point(base: DataPoint, value: float) -> DataPoint:
+    return DataPoint(base.tag_id, base.tag_code, "Q", "参考流量", base.unit or "m3/h", value, base.sample_time, base.receive_time, "good", "computed", "fresh", base.age_minutes, base.stale_minutes, base.max_stale_minutes)
 
 
 def apply_flow_policy(point: sqlite3.Row, data: dict[str, DataPoint]) -> None:
-    configured_parts: list[DataPoint] = []
-    zone = data.get("ZONE_Q")
-    if point["zone_flow_tag_id"] is not None:
-        if not valid_for_fast_calc(zone):
-            if zone:
-                data["Q"] = computed_flow_point(zone, 0, "bad", zone.sample_time)
-            return
-        base = zone
-        effective = float(zone.value or 0)
-        configured_parts.append(zone)
-    else:
-        inflow = data.get("IN_Q")
-        if not valid_for_fast_calc(inflow):
-            return
-        base = inflow
-        effective = float(inflow.value or 0) * float(point["in_flow_weight"] if point["in_flow_weight"] is not None else 1.0)
-        configured_parts.append(inflow)
-
-    status = "manual" if any(part.status == "manual" for part in configured_parts) else "fresh"
-    data["Q"] = computed_flow_point(base, effective, status, latest_sample_time(configured_parts))
+    inflow = data.get("IN_Q")
+    if not valid_for_calc(inflow):
+        return
+    effective = float(inflow.value or 0) * float(point["in_flow_weight"] if point["in_flow_weight"] is not None else 1.0)
+    data["Q"] = computed_flow_point(inflow, effective)
 
 
 def latest_data_for_point(con: sqlite3.Connection, dosing_point_id: int, now: datetime | None = None) -> dict[str, DataPoint]:
     point = con.execute("SELECT * FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
-    if point and (bool(point["source_configured"]) or any(point[field] is not None for field, *_ in PROCESS_SOURCE_MAP)):
-        result: dict[str, DataPoint] = {}
-        for field, logical_type, logical_name, default_unit in PROCESS_SOURCE_MAP:
-            tag_id = point[field]
-            if tag_id is None:
-                continue
-            data = latest_data_for_tag(con, int(tag_id), logical_type, logical_name, default_unit, now)
-            if data:
-                result[logical_type] = data
-        apply_flow_policy(point, result)
-        return result
-
-    tags = con.execute(
-        "SELECT * FROM sensor_tags WHERE dosing_point_id=? AND enabled=1",
-        (dosing_point_id,),
-    ).fetchall()
+    if not point:
+        return {}
     result: dict[str, DataPoint] = {}
-    for tag in tags:
-        sample = con.execute(
-            """
-            SELECT * FROM sensor_samples
-            WHERE tag_id=?
-            ORDER BY sample_time DESC
-            LIMIT 1
-            """,
-            (tag["id"],),
-        ).fetchone()
-        result[tag["tag_type"]] = classify_sample(tag, sample, now)
+    for field, logical_type, logical_name, default_unit in PROCESS_SOURCE_MAP:
+        tag_id = point[field]
+        if tag_id is None:
+            continue
+        data = latest_data_for_tag(con, int(tag_id), logical_type, logical_name, default_unit, now)
+        if data:
+            result[logical_type] = data
+    apply_flow_policy(point, result)
     return result
 
 
-def valid_for_fast_calc(point: DataPoint | None) -> bool:
-    return bool(point and point.value is not None and point.status in {"fresh", "manual"})
+def unit_dose_curve(control: sqlite3.Row | dict[str, Any]) -> list[dict[str, float]]:
+    raw = control["unit_dose_curve_json"] if "unit_dose_curve_json" in control.keys() else None
+    curve = loads_json(raw, DEFAULT_UNIT_DOSE_CURVE)
+    return validate_unit_dose_curve(curve)
 
 
-def valid_for_slow_calc(point: DataPoint | None) -> bool:
-    return bool(point and point.value is not None and point.status in {"fresh", "manual", "delayed"})
+def validate_unit_dose_curve(curve: Any) -> list[dict[str, float]]:
+    if not isinstance(curve, list) or len(curve) < 2:
+        raise ValueError("单耗曲线至少需要 2 个关键点")
+    points: list[dict[str, float]] = []
+    seen: set[float] = set()
+    for item in curve:
+        tp = float(item["tp_mg_l"])
+        dose = float(item["dose_mg_l"])
+        if tp < 0 or dose < 0 or not math.isfinite(tp) or not math.isfinite(dose):
+            raise ValueError("单耗曲线关键点必须是非负有限数")
+        if tp in seen:
+            raise ValueError("单耗曲线出水TP关键点不能重复")
+        seen.add(tp)
+        points.append({"tp_mg_l": tp, "dose_mg_l": dose})
+    return sorted(points, key=lambda item: item["tp_mg_l"])
 
 
-def calculate_mechanism_base(q_m3_h: float, p_control_mg_l: float, pac: sqlite3.Row) -> float:
-    al_kg_l = (
-        pac["pac_density_kg_l"]
-        * float(pac["al2o3_fraction"] if "al2o3_fraction" in pac.keys() else 1.0)
-        * AL_FRACTION_IN_AL2O3
-        * pac["effective_factor"]
-    )
-    if al_kg_l <= 0:
-        raise ValueError("PAC 参数无效：有效铝含量必须大于 0")
-    al_need_kg_h = q_m3_h * p_control_mg_l * AL_P_MASS_RATIO * pac["al_p_ratio"] / 1000
-    return al_need_kg_h / al_kg_l
+def interpolate_unit_dose(tp_out: float, curve: list[dict[str, float]]) -> float:
+    points = validate_unit_dose_curve(curve)
+    if tp_out <= points[0]["tp_mg_l"]:
+        return points[0]["dose_mg_l"]
+    if tp_out >= points[-1]["tp_mg_l"]:
+        return points[-1]["dose_mg_l"]
+    for left, right in zip(points, points[1:]):
+        if left["tp_mg_l"] <= tp_out <= right["tp_mg_l"]:
+            span = right["tp_mg_l"] - left["tp_mg_l"]
+            ratio = 0 if span <= 0 else (tp_out - left["tp_mg_l"]) / span
+            return left["dose_mg_l"] + (right["dose_mg_l"] - left["dose_mg_l"]) * ratio
+    return points[-1]["dose_mg_l"]
 
 
-def feedback_factor(
-    con: sqlite3.Connection,
-    dosing_point_id: int,
-    control: sqlite3.Row,
-    data: dict[str, DataPoint],
-    now: datetime,
-) -> tuple[float, float | None, list[str]]:
-    tp_out = data.get("TP_OUT")
-    if not valid_for_slow_calc(tp_out):
-        return 1.0, None, ["出水 TP 缺失或超时，反馈修正暂停"]
-
-    lag_target = now - timedelta(minutes=int(control["lag_minutes"]))
-    window_start = lag_target - timedelta(minutes=int(control["feedback_window_minutes"]))
-    window_end = lag_target + timedelta(minutes=15)
-    if tp_out.tag_id is None:
-        return 1.0, None, ["未配置出水 TP 标签，反馈修正暂停"]
-
-    rows = con.execute(
-        """
-        SELECT value FROM sensor_samples
-        WHERE tag_id=? AND sample_time BETWEEN ? AND ? AND quality='good'
-        ORDER BY sample_time DESC
-        """,
-        (tp_out.tag_id, window_start.isoformat(), window_end.isoformat()),
-    ).fetchall()
-    if not rows:
-        return 1.0, None, ["滞后窗口内无出水 TP 样本，反馈修正暂停"]
-
-    avg = sum(float(row["value"]) for row in rows) / len(rows)
-    raw = 1 + float(control["feedback_kp"]) * (avg - float(control["tp_target_mg_l"]))
-    k = clamp(raw, float(control["feedback_min"]), float(control["feedback_max"]))
-    return k, avg, [f"滞后 {control['lag_minutes']} min 出水 TP 已对齐", f"反馈窗口样本 {len(rows)} 条"]
+def conservative_formula_l_h(reference_flow_m3_h: float, unit_dose_mg_l: float, density_kg_l: float) -> float:
+    if density_kg_l <= 0:
+        raise ValueError("药剂密度必须大于 0")
+    return reference_flow_m3_h * unit_dose_mg_l / density_kg_l / 1000.0
 
 
-def ai_factor(
-    con: sqlite3.Connection,
-    dosing_point_id: int,
-    data: dict[str, DataPoint],
-    base_l_h: float,
-) -> tuple[float, str, dict[str, Any] | None]:
-    point_model = con.execute(
+def active_model(con: sqlite3.Connection, dosing_point_id: int, model_kind: str) -> sqlite3.Row | None:
+    return con.execute(
         """
         SELECT * FROM model_projects
-        WHERE dosing_point_id=? AND status='published' AND trained_at IS NOT NULL
+        WHERE dosing_point_id=? AND model_kind=? AND status='published' AND trained_at IS NOT NULL
         ORDER BY published_at DESC,id DESC
         LIMIT 1
         """,
-        (dosing_point_id,),
+        (dosing_point_id, model_kind),
     ).fetchone()
-    if point_model:
-        artifact = loads_json(point_model["artifact_json"], {})
-        if artifact.get("format") != "ai_pac_lightgbm_v1" or not artifact.get("booster_model"):
-            return 1.0, "投用模型文件格式无效，K_ai 回退 1.0", None
-        feature_names = artifact.get("feature_names", [])
-        feature_values: dict[str, float | None] = {}
-        row: list[float] = []
-        for key in feature_names:
+
+
+def model_feature_row(artifact: dict[str, Any], data: dict[str, DataPoint], extra: dict[str, float] | None = None) -> tuple[list[float], dict[str, float | None]]:
+    extra = extra or {}
+    row: list[float] = []
+    feature_values: dict[str, float | None] = {}
+    for key in artifact.get("feature_names", []):
+        if key in extra:
+            value = extra[key]
+        else:
             point = data.get(key)
             value = float(point.value) if point and point.value is not None else None
-            feature_values[key] = value
-            row.append(value if value is not None else np.nan)
-        try:
-            booster = lgb.Booster(model_str=artifact["booster_model"])
-            raw = float(booster.predict(np.array([row], dtype=float))[0])
-        except Exception:
-            return 1.0, "投用模型推理异常，K_ai 回退 1.0", None
-        if not math.isfinite(raw):
-            return 1.0, "投用模型计算异常，K_ai 回退 1.0", None
-        k_ai = clamp(raw, float(point_model["output_min"]), float(point_model["output_max"]))
-        detail = {"model_id": point_model["id"], "version": point_model["name"], "features": feature_values, "raw": raw}
-        return k_ai, f"{point_model['name']} 已投用", detail
+        feature_values[key] = value
+        row.append(value if value is not None else np.nan)
+    return row, feature_values
 
-    model = con.execute(
-        "SELECT * FROM model_versions WHERE status='published' ORDER BY published_at DESC LIMIT 1"
-    ).fetchone()
+
+def predict_legacy_tp_forecast_model(model: sqlite3.Row, data: dict[str, DataPoint], extra: dict[str, float] | None = None) -> tuple[float | None, dict[str, Any] | None, str | None]:
+    artifact = loads_json(model["artifact_json"], {})
+    if artifact.get("format") != "ai_pac_tp_forecast_v1":
+        return None, None, "模型文件格式已过期，请重新训练"
+    if not artifact.get("booster_model") or not artifact.get("feature_names"):
+        return None, None, "模型文件无效"
+    try:
+        row, feature_values = model_feature_row(artifact, data, extra)
+        booster = lgb.Booster(model_str=artifact["booster_model"])
+        prediction = float(booster.predict(np.array([row], dtype=float))[0])
+    except Exception:
+        return None, None, "模型推理异常"
+    if not math.isfinite(prediction):
+        return None, None, "模型输出异常"
+    return prediction, {"model_id": model["id"], "version": model["name"], "features": feature_values, "raw": prediction, "format": artifact.get("format")}, None
+
+
+def tp_forecast_for_point(con: sqlite3.Connection, dosing_point_id: int, data: dict[str, DataPoint], control: sqlite3.Row) -> dict[str, Any] | None:
+    model = active_model(con, dosing_point_id, "tp_out_response")
     if not model:
-        return 1.0, "无已发布模型，K_ai 回退 1.0", None
-
-    coeff = loads_json(model["coefficients_json"], {})
-    q = data.get("Q").value if data.get("Q") and data.get("Q").value is not None else 0
-    po4 = data.get("PO4_P").value if data.get("PO4_P") and data.get("PO4_P").value is not None else 0
-    tp_out = data.get("TP_OUT").value if data.get("TP_OUT") and data.get("TP_OUT").value is not None else 0
-    ph = data.get("PH").value if data.get("PH") and data.get("PH").value is not None else 7.2
-    turbidity = data.get("TURBIDITY").value if data.get("TURBIDITY") and data.get("TURBIDITY").value is not None else 15
-
-    normalized = {
-        "q_load": clamp((q - 900) / 1000, -1, 1),
-        "po4": clamp((po4 - 0.35) / 0.5, -1, 1),
-        "tp_out": clamp((tp_out - 0.20) / 0.35, -1, 1),
-        "ph": clamp((ph - 7.2) / 1.2, -1, 1),
-        "turbidity": clamp((turbidity - 15) / 50, -1, 1),
+        return None
+    artifact = loads_json(model["artifact_json"], {})
+    if artifact.get("format") == "ai_pac_tp_forecast_v2":
+        predictions, detail, error = predict_tp_forecast_v2(model, data)
+        if predictions is None:
+            return {"model_id": model["id"], "error": error}
+        selected_horizon = str(int(control["forecast_horizon_minutes"]))
+        selected_prediction = predictions.get(selected_horizon)
+        return {
+            "model_id": model["id"],
+            "model_name": model["name"],
+            "predictions": predictions,
+            "predicted_tp_out": selected_prediction,
+            "horizon_minutes": int(selected_horizon),
+            "detail": detail,
+        }
+    prediction, detail, error = predict_legacy_tp_forecast_model(model, data)
+    if prediction is None:
+        return {"model_id": model["id"], "error": error, "horizon_minutes": int(control["forecast_horizon_minutes"])}
+    return {
+        "model_id": model["id"],
+        "model_name": model["name"],
+        "predicted_tp_out": round(prediction, 4),
+        "horizon_minutes": int(control["forecast_horizon_minutes"]),
+        "detail": detail,
     }
-    raw = float(coeff.get("intercept", 1.0))
-    for key, value in normalized.items():
-        raw += float(coeff.get(key, 0.0)) * value
-
-    if not math.isfinite(raw):
-        return 1.0, "模型计算异常，K_ai 回退 1.0", None
-
-    k_ai = clamp(raw, float(coeff.get("min", 0.70)), float(coeff.get("max", 1.30)))
-    detail = {"model_id": model["id"], "version": model["version"], "features": normalized, "raw": raw}
-    return k_ai, f"{model['version']} 已发布", detail
 
 
-def apply_limits(
-    con: sqlite3.Connection,
-    dosing_point_id: int,
-    control: sqlite3.Row,
-    raw: float,
-    now: datetime,
-) -> tuple[float, float, list[str]]:
-    limited = clamp(raw, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
-    reasons: list[str] = []
-    if abs(limited - raw) > 1e-9:
-        reasons.append("推荐值已按泵量程上下限限幅")
+def predict_tp_forecast_v2(model: sqlite3.Row, data: dict[str, DataPoint], extra: dict[str, float] | None = None) -> tuple[dict[str, float] | None, dict[str, Any] | None, str | None]:
+    artifact = loads_json(model["artifact_json"], {})
+    booster_models = artifact.get("booster_models")
+    if not isinstance(booster_models, dict) or not artifact.get("feature_names"):
+        return None, None, "模型文件无效"
+    try:
+        row, feature_values = model_feature_row(artifact, data, extra)
+        matrix = np.array([row], dtype=float)
+        predictions: dict[str, float] = {}
+        for horizon in ("30", "60", "120"):
+            item = booster_models.get(horizon)
+            if not item or not item.get("booster_model"):
+                return None, None, "模型文件缺少预测时长"
+            booster = lgb.Booster(model_str=item["booster_model"])
+            prediction = float(booster.predict(matrix)[0])
+            if not math.isfinite(prediction):
+                return None, None, "模型输出异常"
+            predictions[horizon] = round(prediction, 4)
+    except Exception:
+        return None, None, "模型推理异常"
+    return predictions, {"model_id": model["id"], "version": model["name"], "features": feature_values, "format": artifact.get("format")}, None
 
-    last = con.execute(
+
+def predict_tp_forecast_horizon(
+    model: sqlite3.Row,
+    data: dict[str, DataPoint],
+    horizon: str,
+    extra: dict[str, float] | None = None,
+) -> tuple[float | None, dict[str, Any] | None, str | None]:
+    artifact = loads_json(model["artifact_json"], {})
+    if artifact.get("format") != "ai_pac_tp_forecast_v2":
+        return None, None, "模型文件格式已过期，请重新训练"
+    booster_models = artifact.get("booster_models")
+    if not isinstance(booster_models, dict) or not artifact.get("feature_names"):
+        return None, None, "模型文件无效"
+    item = booster_models.get(horizon)
+    if not item or not item.get("booster_model"):
+        return None, None, "模型文件缺少预测时长"
+    try:
+        row, feature_values = model_feature_row(artifact, data, extra)
+        booster = lgb.Booster(model_str=item["booster_model"])
+        prediction = float(booster.predict(np.array([row], dtype=float))[0])
+    except Exception:
+        return None, None, "模型推理异常"
+    if not math.isfinite(prediction):
+        return None, None, "模型输出异常"
+    return prediction, {"model_id": model["id"], "version": model["name"], "features": feature_values, "format": artifact.get("format"), "horizon": horizon}, None
+
+
+def point_control(con: sqlite3.Connection, point: sqlite3.Row) -> sqlite3.Row:
+    control = None
+    if point["process_parameter_group_id"] is not None:
+        control = con.execute("SELECT * FROM process_parameter_groups WHERE id=?", (point["process_parameter_group_id"],)).fetchone()
+    if not control:
+        control = con.execute("SELECT * FROM process_parameter_groups ORDER BY id LIMIT 1").fetchone()
+    if not control:
+        raise ValueError("工艺参数未配置")
+    return control
+
+
+def last_final_l_h(con: sqlite3.Connection, dosing_point_id: int, fallback: float) -> float:
+    row = con.execute(
         """
-        SELECT final_l_h,recommend_time FROM recommendations
+        SELECT final_l_h FROM recommendations
         WHERE dosing_point_id=? AND source='online'
-        ORDER BY recommend_time DESC
-        LIMIT 1
+        ORDER BY recommend_time DESC LIMIT 1
         """,
         (dosing_point_id,),
     ).fetchone()
-    if not last:
-        return limited, limited, reasons
-
-    prev = float(last["final_l_h"])
-    last_time = parse_dt(last["recommend_time"]) or now
-    elapsed = max((now - last_time).total_seconds() / 60, 1)
-    step_limit = abs(prev) * float(control["single_step_change_ratio"])
-    if limited >= prev:
-        rate_limit = float(control["max_increase_l_h_per_min"]) * elapsed
-    else:
-        rate_limit = float(control["max_decrease_l_h_per_min"]) * elapsed
-    allowed = max(min(step_limit, rate_limit), 0.1)
-    final = clamp(limited, prev - allowed, prev + allowed)
-    if abs(final - limited) > 1e-9:
-        reasons.append("推荐值变化率已限幅")
-    return limited, final, reasons
+    return float(row["final_l_h"]) if row else fallback
 
 
 def calculate_for_point(
@@ -446,6 +388,7 @@ def calculate_for_point(
     save: bool = True,
     override_data: dict[str, float | None] | None = None,
     source: str = "online",
+    ai_enabled: bool = True,
 ) -> dict[str, Any]:
     now = now or datetime.now().replace(second=0, microsecond=0)
     point = con.execute(
@@ -459,205 +402,159 @@ def calculate_for_point(
     ).fetchone()
     if not point:
         raise ValueError(f"投加点不存在：{dosing_point_id}")
-    pac = con.execute("SELECT * FROM pac_configs WHERE dosing_point_id=?", (dosing_point_id,)).fetchone()
-    control = con.execute("SELECT * FROM control_configs WHERE dosing_point_id=?", (dosing_point_id,)).fetchone()
-    if point["chemical_group_id"] is not None:
-        pac = con.execute(
-            """
-            SELECT id, pac_density_kg_l, 1.0 AS al2o3_fraction, effective_factor, al_p_ratio, batch_id, updated_at
-            FROM chemical_groups
-            WHERE id=?
-            """,
-            (point["chemical_group_id"],),
-        ).fetchone() or pac
-    if point["process_parameter_group_id"] is not None:
-        control = con.execute(
-            """
-            SELECT id, tp_target_mg_l, tp_target_mg_l AS tp_safe_target_mg_l, tp_limit_mg_l,
-                   pac_min_l_h, pac_max_l_h, 0.15 AS single_step_change_ratio,
-                   999.0 AS max_increase_l_h_per_min, 999.0 AS max_decrease_l_h_per_min,
-                   lag_minutes, feedback_kp, feedback_min, feedback_max, feedback_window_minutes,
-                   calculation_interval_seconds, updated_at
-            FROM process_parameter_groups
-            WHERE id=?
-            """,
-            (point["process_parameter_group_id"],),
-        ).fetchone() or control
-    if not pac or not control:
-        raise ValueError("PAC 参数或控制参数未配置")
-
+    control = point_control(con, point)
     data = latest_data_for_point(con, dosing_point_id, now)
     if override_data:
         for tag_type, value in override_data.items():
             if tag_type in data and value is not None:
                 dp = data[tag_type]
-                data[tag_type] = DataPoint(
-                    tag_id=dp.tag_id,
-                    tag_code=dp.tag_code,
-                    tag_type=dp.tag_type,
-                    name=dp.name,
-                    unit=dp.unit,
-                    value=float(value),
-                    sample_time=now.isoformat(),
-                    receive_time=now.isoformat(),
-                    quality="good",
-                    source="simulated",
-                    status="manual" if source == "simulation" else "fresh",
-                    age_minutes=0,
-                    stale_minutes=dp.stale_minutes,
-                    max_stale_minutes=dp.max_stale_minutes,
-                )
+                data[tag_type] = DataPoint(dp.tag_id, dp.tag_code, dp.tag_type, dp.name, dp.unit, float(value), now.isoformat(), now.isoformat(), "good", "override", "fresh", 0, dp.stale_minutes, dp.max_stale_minutes)
+        apply_flow_policy(point, data)
 
     reasons: list[str] = []
-    mode = "normal"
-    quality = "good"
-    ai_allowed = True
     q = data.get("Q")
-    po4 = data.get("PO4_P")
-    tp_before = data.get("TP_BEFORE")
+    tp_out = data.get("TP_OUT")
+    hold_value = last_final_l_h(con, dosing_point_id, float(control["pac_min_l_h"]))
+    tp_forecast = tp_forecast_for_point(con, dosing_point_id, data, control)
 
-    last_rec = con.execute(
-        """
-        SELECT final_l_h FROM recommendations
-        WHERE dosing_point_id=? AND source='online'
-        ORDER BY recommend_time DESC LIMIT 1
-        """,
-        (dosing_point_id,),
-    ).fetchone()
-    hold_value = float(last_rec["final_l_h"]) if last_rec else float(control["pac_min_l_h"])
+    if not valid_for_calc(q) or not valid_for_calc(tp_out):
+        final = clamp(hold_value, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
+        reasons.append("出水TP或进水流量实时数据异常，保留上次计算结果")
+        upsert_alarm(con, severity="high", title=f"{point['name']} 关键实时数据异常", category="data", message="出水TP或进水流量不是实时正常数据。", dosing_point_id=dosing_point_id, event_time=now.isoformat())
+        return _persist_and_pack(con, dosing_point_id, now, point, data, "abnormal", "bad", final, final, final, final, reasons, None, tp_forecast, save, source)
 
-    tp_out_limit = data.get("TP_OUT")
-    if valid_for_fast_calc(tp_out_limit) and float(tp_out_limit.value or 0) > float(control["tp_limit_mg_l"]):
-        final = float(control["pac_max_l_h"])
-        reasons.append("出水 TP 超过限制，直接输出最大加药流量")
-        upsert_alarm(
-            con,
-            severity="high",
-            title=f"{point['name']} 出水 TP 超限",
-            category="data",
-            message=f"出水 TP {tp_out_limit.value:.3f} mg/L 超过限制 {control['tp_limit_mg_l']} mg/L。",
-            dosing_point_id=dosing_point_id,
-            event_time=now.isoformat(),
-        )
-        return _persist_and_pack(con, dosing_point_id, now, point, data, "conservative", "degraded", final, 1.0, 1.0, final, final, final, reasons, None, None, save, source)
-    clear_alarm(con, title=f"{point['name']} 出水 TP 超限", category="data", dosing_point_id=dosing_point_id)
-
-    if not valid_for_fast_calc(q):
-        mode = "conservative"
-        quality = "degraded"
-        base = hold_value
-        k_feedback = 1.0
-        k_ai = 1.0
-        raw = base
-        limited = clamp(raw, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
-        final = limited
-        reasons.append("流量缺失或超时，保持上次有效建议/最低保守值")
-        upsert_alarm(
-            con,
-            severity="high",
-            title=f"{point['name']} 流量不可用",
-            category="data",
-            message="流量为关键输入，当前进入保守模式。",
-            dosing_point_id=dosing_point_id,
-            event_time=now.isoformat(),
-        )
-        return _persist_and_pack(con, dosing_point_id, now, point, data, mode, quality, base, k_feedback, k_ai, raw, limited, final, reasons, None, None, save, source)
-
-    clear_alarm(con, title=f"{point['name']} 流量不可用", category="data", dosing_point_id=dosing_point_id)
+    clear_alarm(con, title=f"{point['name']} 关键实时数据异常", category="data", dosing_point_id=dosing_point_id)
     q_value = float(q.value or 0)
-    if q_value <= 0:
-        mode = "manual" if q.source == "manual" else "conservative"
-        reasons.append("流量为 0，判定停水/停线，建议 0 L/h")
-        return _persist_and_pack(con, dosing_point_id, now, point, data, mode, "good", 0, 1.0, 1.0, 0, 0, 0, reasons, None, None, save, source)
-    if point["zone_flow_tag_id"] is not None:
-        reasons.append("参与计算流量优先采用分区流量")
+    current_tp_value = float(tp_out.value or 0)
+
+    curve = unit_dose_curve(control)
+    unit_dose = interpolate_unit_dose(current_tp_value, curve)
+    base = conservative_formula_l_h(q_value, unit_dose, float(control["pac_density_kg_l"]))
+    reasons.append(f"保守公式单耗曲线按实时出水TP {current_tp_value:.4g} mg/L 得到 {unit_dose:.4g} mg/L")
+    reasons.append(f"保守公式：参考流量 {q_value:.4g} × 单耗 {unit_dose:.4g} / 密度 {float(control['pac_density_kg_l']):.4g} / 1000")
+
+    raw = base
+    mode = "conservative"
+    ai_detail: dict[str, Any] | None = None
+    if ai_enabled and tp_forecast and tp_forecast.get("model_id") and not tp_forecast.get("error"):
+        model = active_model(con, dosing_point_id, "tp_out_response")
+        optimized, detail, error = optimize_pac_by_tp_forecast_model(model, data, control) if model else (None, None, "无投用出水TP预测模型")
+        if optimized is not None:
+            raw = optimized
+            mode = "normal"
+            ai_detail = detail
+            reasons.append(f"正常模式：枚举PAC加药流量，按{int(control['forecast_horizon_minutes'])}分钟预测TP寻找刚低于目标TP {float(control['tp_target_mg_l']):.4g} mg/L 的最小加药量")
+        else:
+            reasons.append(error or "无投用出水TP预测模型，使用保守公式")
     else:
-        reasons.append(f"参与计算流量采用进水流量 × {float(point['in_flow_weight'] or 0):.3g}")
+        reasons.append("无投用出水TP预测模型，使用保守模式纯计算")
+    if mode == "conservative" and current_tp_value > float(control["tp_upper_mg_l"]):
+        final = float(control["pac_max_l_h"])
+        reasons.append("实时出水TP高于上限，直接输出最大加药流量")
+        upsert_alarm(con, severity="high", title=f"{point['name']} 出水TP高于上限", category="data", message=f"实时出水TP {current_tp_value:.4g} mg/L 高于上限 {float(control['tp_upper_mg_l']):.4g} mg/L。", dosing_point_id=dosing_point_id, event_time=now.isoformat())
+        return _persist_and_pack(con, dosing_point_id, now, point, data, "conservative", "good", final, final, final, final, reasons, None, tp_forecast, save, source)
+    clear_alarm(con, title=f"{point['name']} 出水TP高于上限", category="data", dosing_point_id=dosing_point_id)
 
-    if valid_for_fast_calc(po4):
-        p_value = float(po4.value or 0)
-        p_source = "PO4-P"
-        reasons.append("PO4-P fresh")
-    elif valid_for_fast_calc(tp_before):
-        p_value = float(tp_before.value or 0)
-        p_source = "TP"
-        reasons.append("PO4-P 缺失，已回退投加前 TP")
-        mode = "conservative"
-        quality = "degraded"
-    else:
-        mode = "conservative"
-        quality = "degraded"
-        base = hold_value
-        reasons.append("磷数据全部缺失或超时，保守模式，不使用 AI 猜测")
-        upsert_alarm(
-            con,
-            severity="high",
-            title=f"{point['name']} 磷数据不可用",
-            category="data",
-            message="PO4-P 与投加前 TP 均不可用于关键计算。",
-            dosing_point_id=dosing_point_id,
-            event_time=now.isoformat(),
-        )
-        return _persist_and_pack(con, dosing_point_id, now, point, data, mode, quality, base, 1.0, 1.0, base, base, base, reasons, None, None, save, source)
+    limited = clamp(raw, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
+    final = limited
+    if abs(limited - raw) > 1e-9:
+        reasons.append("建议值已按最小/最大 L/h 限幅")
+    return _persist_and_pack(con, dosing_point_id, now, point, data, mode, "good", base, raw, limited, final, reasons, ai_detail, tp_forecast, save, source)
 
-    clear_alarm(con, title=f"{point['name']} 磷数据不可用", category="data", dosing_point_id=dosing_point_id)
-    p_control = max(p_value - float(control["tp_target_mg_l"]), 0)
-    base = calculate_mechanism_base(q_value, p_control, pac)
-    reasons.append(f"机理公式按 {p_source} 与目标 TP 计算")
 
-    k_feedback, tp_lag_avg, feedback_reasons = feedback_factor(con, dosing_point_id, control, data, now)
-    reasons.extend(feedback_reasons)
-    if k_feedback == 1.0 and tp_lag_avg is None:
-        quality = "degraded" if quality == "good" else quality
+def optimize_pac_by_tp_forecast_model(
+    model: sqlite3.Row,
+    data: dict[str, DataPoint],
+    control: sqlite3.Row,
+) -> tuple[float | None, dict[str, Any] | None, str | None]:
+    horizon = str(int(control["forecast_horizon_minutes"]))
+    target_tp = float(control["tp_target_mg_l"])
+    min_l_h = float(control["pac_min_l_h"])
+    max_l_h = float(control["pac_max_l_h"])
+    if max_l_h < min_l_h:
+        return None, None, "最大加药量小于最小加药量"
+    steps = int(round((max_l_h - min_l_h) / 0.1))
+    best: tuple[float, float] | None = None
+    lowest_prediction: tuple[float, float] | None = None
+    last_prediction: tuple[float, float] | None = None
+    checked = 0
+    current_pac = current_pac_l_h(data, min_l_h, max_l_h)
+    current_prediction, _current_detail, current_error = predict_tp_forecast_horizon(model, data, horizon, {"PAC_ACTUAL": current_pac})
+    if current_prediction is None:
+        return None, None, current_error
+    for index in range(steps + 1):
+        candidate = round(min_l_h + index * 0.1, 1)
+        if candidate > max_l_h:
+            candidate = max_l_h
+        prediction, _detail, error = predict_tp_forecast_horizon(model, data, horizon, {"PAC_ACTUAL": candidate})
+        if prediction is None:
+            return None, None, error
+        checked += 1
+        last_prediction = (candidate, prediction)
+        if lowest_prediction is None or prediction < lowest_prediction[1] - 1e-9:
+            lowest_prediction = (candidate, prediction)
+        if prediction <= target_tp:
+            best = (candidate, prediction)
+            break
+    if best is None and (last_prediction is None or last_prediction[0] < max_l_h):
+        prediction, _detail, error = predict_tp_forecast_horizon(model, data, horizon, {"PAC_ACTUAL": max_l_h})
+        if prediction is None:
+            return None, None, error
+        checked += 1
+        last_prediction = (max_l_h, prediction)
+        if lowest_prediction is None or prediction < lowest_prediction[1] - 1e-9:
+            lowest_prediction = (max_l_h, prediction)
+    model_sensitive = bool(lowest_prediction and current_prediction - lowest_prediction[1] >= 0.005)
+    selected = best
+    if selected is None:
+        detail = {
+            "model_id": model["id"],
+            "version": model["name"],
+            "horizon_minutes": int(horizon),
+            "target_tp": target_tp,
+            "current_l_h": current_pac,
+            "current_predicted_tp_out": round(current_prediction, 4),
+            "lowest_predicted_l_h": lowest_prediction[0] if lowest_prediction else None,
+            "lowest_predicted_tp_out": round(lowest_prediction[1], 4) if lowest_prediction else None,
+            "step_l_h": 0.1,
+            "checked_candidates": checked,
+            "target_met": False,
+            "fallback_reason": "fallback_conservative_unmet_target",
+            "model_sensitive": model_sensitive,
+            "search_min_l_h": min_l_h,
+            "search_max_l_h": max_l_h,
+        }
+        return None, detail, f"枚举范围内没有找到预测TP小于等于目标TP的加药量，回退保守模式；最低预测TP {detail['lowest_predicted_tp_out']} mg/L"
+    selected_l_h, selected_tp = selected
+    return (
+        selected_l_h,
+        {
+            "model_id": model["id"],
+            "version": model["name"],
+            "horizon_minutes": int(horizon),
+            "target_tp": target_tp,
+            "selected_l_h": selected_l_h,
+            "predicted_tp_out": round(selected_tp, 4),
+            "current_l_h": current_pac,
+            "current_predicted_tp_out": round(current_prediction, 4),
+            "lowest_predicted_l_h": lowest_prediction[0] if lowest_prediction else None,
+            "lowest_predicted_tp_out": round(lowest_prediction[1], 4) if lowest_prediction else None,
+            "step_l_h": 0.1,
+            "checked_candidates": checked,
+            "target_met": True,
+            "fallback_reason": None,
+            "search_min_l_h": min_l_h,
+            "search_max_l_h": max_l_h,
+        },
+        None,
+    )
 
-    chemical_alarm = con.execute(
-        """
-        SELECT id FROM alarms
-        WHERE dosing_point_id=? AND status='active' AND category='chemical'
-        LIMIT 1
-        """,
-        (dosing_point_id,),
-    ).fetchone()
-    if chemical_alarm:
-        mode = "conservative"
-        quality = "degraded"
-        ai_allowed = False
-        reasons.append("PAC 批次待确认，进入保守推荐")
 
-    k_ai, ai_reason, ai_detail = ai_factor(con, dosing_point_id, data, base)
-    if not ai_allowed:
-        k_ai = 1.0
-        ai_detail = None
-        reasons.append("当前工况禁止 AI 修正，K_ai 回退 1.0")
-    else:
-        reasons.append(ai_reason)
-
-    ph = data.get("PH")
-    if ph and ph.value is not None and (ph.value < 5.5 or ph.value > 9.0):
-        mode = "conservative"
-        quality = "degraded"
-        k_ai = 1.0
-        reasons.append("pH 超出 PAC 合理范围，限制 AI 修正")
-        upsert_alarm(
-            con,
-            severity="medium",
-            title=f"{point['name']} pH 异常",
-            category="data",
-            message="pH 超出建议范围，现场需复核混凝条件。",
-            dosing_point_id=dosing_point_id,
-            event_time=now.isoformat(),
-        )
-
-    raw = base * k_feedback * k_ai
-    limited, final, limit_reasons = apply_limits(con, dosing_point_id, control, raw, now)
-    reasons.extend(limit_reasons)
-
-    if any(dp.status == "manual" for dp in data.values()):
-        mode = "manual" if source != "simulation" else "simulation"
-    if source == "simulation":
-        mode = "simulation"
-
-    return _persist_and_pack(con, dosing_point_id, now, point, data, mode, quality, base, k_feedback, k_ai, raw, limited, final, reasons, tp_lag_avg, ai_detail, save, source)
+def current_pac_l_h(data: dict[str, DataPoint], min_l_h: float, max_l_h: float) -> float:
+    point = data.get("PAC_ACTUAL")
+    if not point or point.value is None:
+        return min_l_h
+    return round(clamp(float(point.value), min_l_h, max_l_h), 1)
 
 
 def _persist_and_pack(
@@ -669,14 +566,12 @@ def _persist_and_pack(
     mode: str,
     quality: str,
     base: float,
-    k_feedback: float,
-    k_ai: float,
     raw: float,
     limited: float,
     final: float,
     reasons: list[str],
-    tp_lag_avg: float | None,
     ai_detail: dict[str, Any] | None,
+    tp_forecast: dict[str, Any] | None,
     save: bool,
     source: str,
 ) -> dict[str, Any]:
@@ -684,50 +579,41 @@ def _persist_and_pack(
     explanation = {
         "mode": mode,
         "base_l_h": round(base, 3),
-        "k_feedback": round(k_feedback, 4),
-        "k_ai": round(k_ai, 4),
         "raw_l_h": round(raw, 3),
         "limited_l_h": round(limited, 3),
         "final_l_h": round(final, 3),
-        "tp_lag_avg": round(tp_lag_avg, 4) if tp_lag_avg is not None else None,
         "reason": reasons,
         "ai_detail": ai_detail,
+        "tp_forecast": tp_forecast,
         "created_at": utc_now_iso(),
     }
     if save:
-        cur = con.execute(
-            """
-            INSERT OR REPLACE INTO recommendations(
-                dosing_point_id,recommend_time,mode,base_l_h,k_feedback,k_ai,raw_l_h,limited_l_h,final_l_h,quality,source
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                dosing_point_id,
-                now.isoformat(),
-                mode,
-                round(base, 6),
-                round(k_feedback, 6),
-                round(k_ai, 6),
-                round(raw, 6),
-                round(limited, 6),
-                round(final, 6),
-                quality,
-                source,
-            ),
-        )
+        recommendation_columns = {row["name"] for row in con.execute("PRAGMA table_info(recommendations)").fetchall()}
+        if {"k_feedback", "k_ai"} <= recommendation_columns:
+            cur = con.execute(
+                """
+                INSERT OR REPLACE INTO recommendations(
+                    dosing_point_id,recommend_time,mode,base_l_h,k_feedback,k_ai,raw_l_h,limited_l_h,final_l_h,quality,source
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (dosing_point_id, now.isoformat(), mode, round(base, 6), 1.0, 1.0, round(raw, 6), round(limited, 6), round(final, 6), quality, source),
+            )
+        else:
+            cur = con.execute(
+                """
+                INSERT OR REPLACE INTO recommendations(
+                    dosing_point_id,recommend_time,mode,base_l_h,raw_l_h,limited_l_h,final_l_h,quality,source
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (dosing_point_id, now.isoformat(), mode, round(base, 6), round(raw, 6), round(limited, 6), round(final, 6), quality, source),
+            )
         recommendation_id = cur.lastrowid
         if recommendation_id == 0:
-            row = con.execute(
-                "SELECT id FROM recommendations WHERE dosing_point_id=? AND recommend_time=? AND source=?",
-                (dosing_point_id, now.isoformat(), source),
-            ).fetchone()
+            row = con.execute("SELECT id FROM recommendations WHERE dosing_point_id=? AND recommend_time=? AND source=?", (dosing_point_id, now.isoformat(), source)).fetchone()
             recommendation_id = row["id"] if row else None
         if recommendation_id:
             con.execute(
-                """
-                INSERT OR REPLACE INTO recommendation_explanations(recommendation_id,explanation_json)
-                VALUES(?,?)
-                """,
+                "INSERT OR REPLACE INTO recommendation_explanations(recommendation_id,explanation_json) VALUES(?,?)",
                 (recommendation_id, dumps_json(explanation)),
             )
 
@@ -740,13 +626,12 @@ def _persist_and_pack(
         "mode": mode,
         "quality": quality,
         "base_l_h": round(base, 2),
-        "k_feedback": round(k_feedback, 3),
-        "k_ai": round(k_ai, 3),
         "raw_l_h": round(raw, 2),
         "limited_l_h": round(limited, 2),
         "final_l_h": round(final, 2),
         "reasons": reasons,
-        "tp_lag_avg": round(tp_lag_avg, 4) if tp_lag_avg is not None else None,
+        "tp_lag_avg": None,
+        "tp_forecast": tp_forecast,
         "data": {key: datapoint_to_dict(value) for key, value in data.items()},
     }
 

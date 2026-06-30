@@ -39,12 +39,10 @@ def data_quality_rows(con) -> list[dict[str, Any]]:
         item["sample_source"] = source
         sample_time = datetime.fromisoformat(timestamp) if timestamp else None
         age = (now - sample_time).total_seconds() / 60 if sample_time else None
-        if quality != "good":
+        if quality != "good" or source == "manual":
             status = "bad"
         elif age is None:
             status = "stale"
-        elif source == "manual":
-            status = "manual"
         elif age <= row["stale_minutes"]:
             status = "fresh"
         elif age <= row["max_stale_minutes"]:

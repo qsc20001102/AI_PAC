@@ -5,8 +5,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from app.api.common import row_to_dict
-from app.database import db_session, infer_process_source_tags, loads_json, utc_now_iso
-from app.schemas import ControlConfigUpdate, DosingPointCreate, DosingPointUpdate, PacConfigUpdate
+from app.database import LEARNING_SOURCE_TAG_DEFS, db_session, infer_process_source_tags, loads_json, utc_now_iso
+from app.schemas import DosingPointCreate, DosingPointUpdate
 from app.services.audit import audit
 from app.services.recommendation import calculate_for_point
 
@@ -17,13 +17,31 @@ router = APIRouter()
 PROCESS_SOURCE_TAG_FIELDS = [
     "in_flow_tag_id",
     "in_tp_tag_id",
+    "in_ph_tag_id",
     "out_flow_tag_id",
     "out_tp_tag_id",
-    "zone_flow_tag_id",
     "reflux_flow_1_tag_id",
     "reflux_flow_2_tag_id",
-    "po4_tag_id",
     "pac_flow_tag_id",
+    *[field for field, *_ in LEARNING_SOURCE_TAG_DEFS],
+]
+
+
+TAG_DEFS = [
+    ("Q", "流量", "m3/h", 3, 15, 0, 4000),
+    ("TP_BEFORE", "投加前 TP", "mg/L", 20, 120, 0, 20),
+    ("TP_OUT", "出水 TP", "mg/L", 30, 180, 0, 5),
+    ("PH", "pH", "", 10, 60, 3, 11),
+    ("PAC_ACTUAL", "PAC 实际", "L/h", 10, 60, 0, 200),
+    ("TURBIDITY", "浊度", "NTU", 30, 120, 0, 300),
+    ("BIO_ORP1", "生化池ORP1", "mV", 10, 60, -1000, 1000),
+    ("BIO_ORP2", "生化池ORP2", "mV", 10, 60, -1000, 1000),
+    ("BIO_ORP3", "生化池ORP3", "mV", 10, 60, -1000, 1000),
+    ("BIO_ORP4", "生化池ORP4", "mV", 10, 60, -1000, 1000),
+    ("BIO_DO1", "生化池DO1", "mg/L", 10, 60, 0, 20),
+    ("BIO_DO2", "生化池DO2", "mg/L", 10, 60, 0, 20),
+    ("BIO_MLSS1", "生化池MLSS1", "mg/L", 30, 120, 0, 20000),
+    ("BIO_MLSS2", "生化池MLSS2", "mg/L", 30, 120, 0, 20000),
 ]
 
 
@@ -44,6 +62,11 @@ def latest_recommendation(con, dosing_point_id: int) -> dict[str, Any] | None:
     data = row_to_dict(row)
     data["explanation"] = loads_json(row["explanation_json"], {})
     data.pop("explanation_json", None)
+    data.pop("k_feedback", None)
+    data.pop("k_ai", None)
+    if isinstance(data["explanation"], dict):
+        data["explanation"].pop("k_feedback", None)
+        data["explanation"].pop("k_ai", None)
     return data
 
 
@@ -52,19 +75,20 @@ def dosing_points() -> list[dict[str, Any]]:
     with db_session() as con:
         rows = con.execute(
             """
-            SELECT dp.*, pl.name AS process_line_name, pl.line_code, pa.name AS area_name, p.name AS plant_name
+            SELECT dp.*, pl.name AS process_line_name, pl.line_code, pa.name AS area_name, p.name AS plant_name,
+                   ppg.name AS process_parameter_group_name
             FROM dosing_points dp
             JOIN process_lines pl ON pl.id=dp.process_line_id
             JOIN process_areas pa ON pa.id=pl.area_id
             JOIN plants p ON p.id=pa.plant_id
+            LEFT JOIN process_parameter_groups ppg ON ppg.id=dp.process_parameter_group_id
             ORDER BY dp.display_order
             """
         ).fetchall()
         result = []
         for row in rows:
-            item = row_to_dict(row)
-            item["pac_config"] = row_to_dict(con.execute("SELECT * FROM pac_configs WHERE dosing_point_id=?", (row["id"],)).fetchone())
-            item["control_config"] = row_to_dict(con.execute("SELECT * FROM control_configs WHERE dosing_point_id=?", (row["id"],)).fetchone())
+            item = public_dosing_point(row_to_dict(row))
+            item["control_config"] = public_control_config(row_to_dict(con.execute("SELECT * FROM process_parameter_groups WHERE id=?", (row["process_parameter_group_id"],)).fetchone()))
             item["latest_recommendation"] = latest_recommendation(con, row["id"])
             item["source_tags"] = source_tag_options(con, row["id"])
             result.append(item)
@@ -83,44 +107,20 @@ def create_dosing_point(payload: DosingPointCreate) -> dict[str, Any]:
         cur = con.execute(
             """
             INSERT INTO dosing_points(
-                process_line_id,name,code,enabled,flow_source,phosphorus_source,feedback_source,
-                in_flow_tag_id,in_tp_tag_id,out_flow_tag_id,out_tp_tag_id,zone_flow_tag_id,
-                in_flow_weight,reflux_flow_1_tag_id,reflux_flow_2_tag_id,po4_tag_id,pac_flow_tag_id,
-                chemical_group_id,process_parameter_group_id,source_configured,manual_contribution_factor,
-                display_order,write_enabled
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                process_line_id,name,code,enabled,flow_source,
+                in_flow_tag_id,in_tp_tag_id,in_ph_tag_id,out_flow_tag_id,out_tp_tag_id,
+                in_flow_weight,reflux_flow_1_tag_id,reflux_flow_2_tag_id,pac_flow_tag_id,
+                bio_orp1_tag_id,bio_orp2_tag_id,bio_orp3_tag_id,bio_orp4_tag_id,
+                bio_do1_tag_id,bio_do2_tag_id,bio_mlss1_tag_id,bio_mlss2_tag_id,
+                process_parameter_group_id,source_configured,display_order,write_enabled
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
-            (
-                process_line_id,
-                payload.name,
-                payload.code,
-                int(payload.enabled),
-                payload.flow_source or "line",
-                payload.phosphorus_source or "po4_priority",
-                payload.feedback_source or "line_out",
-                payload.in_flow_tag_id,
-                payload.in_tp_tag_id,
-                payload.out_flow_tag_id,
-                payload.out_tp_tag_id,
-                payload.zone_flow_tag_id,
-                payload.in_flow_weight,
-                payload.reflux_flow_1_tag_id,
-                payload.reflux_flow_2_tag_id,
-                payload.po4_tag_id,
-                payload.pac_flow_tag_id,
-                payload.chemical_group_id,
-                payload.process_parameter_group_id,
-                int(any(getattr(payload, field) is not None for field in PROCESS_SOURCE_TAG_FIELDS)),
-                payload.manual_contribution_factor if payload.manual_contribution_factor is not None else 1.0,
-                display_order,
-                int(payload.write_enabled),
-            ),
+            point_values(payload, process_line_id, display_order),
         )
         point_id = int(cur.lastrowid)
-        create_default_point_config(con, point_id, payload.code)
-        if not any(getattr(payload, field) is not None for field in PROCESS_SOURCE_TAG_FIELDS):
-            backfill_point_source_tags(con, point_id)
-        assign_default_groups(con, point_id)
+        create_default_point_tags(con, point_id, payload.code)
+        backfill_point_source_tags(con, point_id)
+        assign_default_group(con, point_id)
         audit(con, "local", "create", "dosing_point", str(point_id), payload.model_dump())
         result = calculate_for_point(con, point_id)
     return {"ok": True, "id": point_id, "recommendation": result}
@@ -135,42 +135,21 @@ def update_dosing_point(point_id: int, payload: DosingPointUpdate) -> dict[str, 
         validate_dosing_point_payload(con, payload, point_id=point_id)
         validate_process_source_tags(con, payload, point_id=point_id)
         process_line_id = payload.process_line_id if payload.process_line_id is not None else point["process_line_id"]
+        display_order = payload.display_order if payload.display_order is not None else point["display_order"]
         old_code = point["code"]
         con.execute(
             """
             UPDATE dosing_points
-            SET process_line_id=?, name=?, code=?, enabled=?, flow_source=?, phosphorus_source=?, feedback_source=?,
-                in_flow_tag_id=?, in_tp_tag_id=?, out_flow_tag_id=?, out_tp_tag_id=?, zone_flow_tag_id=?,
-                in_flow_weight=?, reflux_flow_1_tag_id=?, reflux_flow_2_tag_id=?, po4_tag_id=?, pac_flow_tag_id=?,
-                chemical_group_id=?, process_parameter_group_id=?, source_configured=1,
-                manual_contribution_factor=?, display_order=?, write_enabled=?
+            SET process_line_id=?, name=?, code=?, enabled=?, flow_source=?,
+                in_flow_tag_id=?, in_tp_tag_id=?, in_ph_tag_id=?, out_flow_tag_id=?, out_tp_tag_id=?,
+                in_flow_weight=?, reflux_flow_1_tag_id=?, reflux_flow_2_tag_id=?, pac_flow_tag_id=?,
+                bio_orp1_tag_id=?, bio_orp2_tag_id=?, bio_orp3_tag_id=?, bio_orp4_tag_id=?,
+                bio_do1_tag_id=?, bio_do2_tag_id=?, bio_mlss1_tag_id=?, bio_mlss2_tag_id=?,
+                process_parameter_group_id=?, source_configured=?,
+                display_order=?, write_enabled=?
             WHERE id=?
             """,
-            (
-                process_line_id,
-                payload.name,
-                payload.code,
-                int(payload.enabled),
-                payload.flow_source or point["flow_source"],
-                payload.phosphorus_source or point["phosphorus_source"],
-                payload.feedback_source or point["feedback_source"],
-                payload.in_flow_tag_id,
-                payload.in_tp_tag_id,
-                payload.out_flow_tag_id,
-                payload.out_tp_tag_id,
-                payload.zone_flow_tag_id,
-                payload.in_flow_weight,
-                payload.reflux_flow_1_tag_id,
-                payload.reflux_flow_2_tag_id,
-                payload.po4_tag_id,
-                payload.pac_flow_tag_id,
-                payload.chemical_group_id if payload.chemical_group_id is not None else point["chemical_group_id"],
-                payload.process_parameter_group_id if payload.process_parameter_group_id is not None else point["process_parameter_group_id"],
-                payload.manual_contribution_factor if payload.manual_contribution_factor is not None else point["manual_contribution_factor"],
-                payload.display_order if payload.display_order is not None else point["display_order"],
-                int(payload.write_enabled if payload.write_enabled is not None else point["write_enabled"]),
-                point_id,
-            ),
+            (*point_values(payload, process_line_id, display_order), point_id),
         )
         if old_code != payload.code:
             rename_point_tag_codes(con, point_id, payload.code)
@@ -195,8 +174,6 @@ def delete_dosing_point(point_id: int) -> dict[str, Any]:
         con.execute("DELETE FROM model_shadow_results WHERE dosing_point_id=?", (point_id,))
         con.execute("DELETE FROM recommendations WHERE dosing_point_id=?", (point_id,))
         con.execute("DELETE FROM sensor_tags WHERE dosing_point_id=?", (point_id,))
-        con.execute("DELETE FROM pac_configs WHERE dosing_point_id=?", (point_id,))
-        con.execute("DELETE FROM control_configs WHERE dosing_point_id=?", (point_id,))
         con.execute("DELETE FROM dosing_points WHERE id=?", (point_id,))
         audit(con, "local", "delete", "dosing_point", str(point_id), {"name": point["name"], "code": point["code"]})
     return {"ok": True, "deleted_id": point_id}
@@ -209,78 +186,96 @@ def point_config(point_id: int) -> dict[str, Any]:
         if not point:
             raise HTTPException(404, "投加点不存在")
         return {
-            "point": row_to_dict(point),
-            "pac_config": row_to_dict(con.execute("SELECT * FROM pac_configs WHERE dosing_point_id=?", (point_id,)).fetchone()),
-            "control_config": row_to_dict(con.execute("SELECT * FROM control_configs WHERE dosing_point_id=?", (point_id,)).fetchone()),
+            "point": public_dosing_point(row_to_dict(point)),
+            "control_config": public_control_config(row_to_dict(con.execute("SELECT * FROM process_parameter_groups WHERE id=?", (point["process_parameter_group_id"],)).fetchone())),
         }
 
 
-@router.put("/api/dosing-points/{point_id}/pac-config")
-def update_pac_config(point_id: int, payload: PacConfigUpdate) -> dict[str, Any]:
-    with db_session() as con:
-        exists = con.execute("SELECT id FROM dosing_points WHERE id=?", (point_id,)).fetchone()
-        if not exists:
-            raise HTTPException(404, "投加点不存在")
-        con.execute(
-            """
-            UPDATE pac_configs
-            SET pac_density_kg_l=?, al2o3_fraction=?, effective_factor=?, al_p_ratio=?, batch_id=?, updated_at=?
-            WHERE dosing_point_id=?
-            """,
-            (
-                payload.pac_density_kg_l,
-                payload.al2o3_fraction,
-                payload.effective_factor,
-                payload.al_p_ratio,
-                payload.batch_id,
-                utc_now_iso(),
-                point_id,
-            ),
-        )
-        audit(con, "local", "update", "pac_config", str(point_id), payload.model_dump())
-        result = calculate_for_point(con, point_id)
-    return {"ok": True, "recommendation": result}
+def public_dosing_point(row: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "id",
+        "process_line_id",
+        "name",
+        "code",
+        "enabled",
+        "flow_source",
+        "display_order",
+        "write_enabled",
+        "in_flow_tag_id",
+        "in_tp_tag_id",
+        "in_ph_tag_id",
+        "out_flow_tag_id",
+        "out_tp_tag_id",
+        "reflux_flow_1_tag_id",
+        "reflux_flow_2_tag_id",
+        "pac_flow_tag_id",
+        "source_configured",
+        "in_flow_weight",
+        "process_parameter_group_id",
+        "bio_orp1_tag_id",
+        "bio_orp2_tag_id",
+        "bio_orp3_tag_id",
+        "bio_orp4_tag_id",
+        "bio_do1_tag_id",
+        "bio_do2_tag_id",
+        "bio_mlss1_tag_id",
+        "bio_mlss2_tag_id",
+        "process_line_name",
+        "line_code",
+        "area_name",
+        "plant_name",
+        "process_parameter_group_name",
+    }
+    return {key: row.get(key) for key in allowed if key in row}
 
 
-@router.put("/api/dosing-points/{point_id}/control-config")
-def update_control_config(point_id: int, payload: ControlConfigUpdate) -> dict[str, Any]:
-    if payload.pac_max_l_h < payload.pac_min_l_h:
-        raise HTTPException(422, "最大加药量必须大于等于最小加药量")
-    if payload.feedback_max < payload.feedback_min:
-        raise HTTPException(422, "反馈上限必须大于等于反馈下限")
-    with db_session() as con:
-        exists = con.execute("SELECT id FROM dosing_points WHERE id=?", (point_id,)).fetchone()
-        if not exists:
-            raise HTTPException(404, "投加点不存在")
-        con.execute(
-            """
-            UPDATE control_configs
-            SET tp_target_mg_l=?, tp_safe_target_mg_l=?, tp_limit_mg_l=?, pac_min_l_h=?, pac_max_l_h=?,
-                single_step_change_ratio=?, max_increase_l_h_per_min=?, max_decrease_l_h_per_min=?,
-                lag_minutes=?, feedback_kp=?, feedback_min=?, feedback_max=?, feedback_window_minutes=?, updated_at=?
-            WHERE dosing_point_id=?
-            """,
-            (
-                payload.tp_target_mg_l,
-                payload.tp_safe_target_mg_l,
-                payload.tp_limit_mg_l,
-                payload.pac_min_l_h,
-                payload.pac_max_l_h,
-                payload.single_step_change_ratio,
-                payload.max_increase_l_h_per_min,
-                payload.max_decrease_l_h_per_min,
-                payload.lag_minutes,
-                payload.feedback_kp,
-                payload.feedback_min,
-                payload.feedback_max,
-                payload.feedback_window_minutes,
-                utc_now_iso(),
-                point_id,
-            ),
-        )
-        audit(con, "local", "update", "control_config", str(point_id), payload.model_dump())
-        result = calculate_for_point(con, point_id)
-    return {"ok": True, "recommendation": result}
+def public_control_config(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "tp_target_mg_l": row["tp_target_mg_l"],
+        "tp_upper_mg_l": row.get("tp_upper_mg_l", row.get("tp_limit_mg_l")),
+        "pac_min_l_h": row["pac_min_l_h"],
+        "pac_max_l_h": row["pac_max_l_h"],
+        "calculation_interval_seconds": row["calculation_interval_seconds"],
+        "pac_density_kg_l": row.get("pac_density_kg_l", 1.2),
+        "unit_dose_curve": row.get("unit_dose_curve", []),
+        "forecast_horizon_minutes": row.get("forecast_horizon_minutes", 120),
+        "updated_at": row["updated_at"],
+    }
+
+
+def point_values(payload: DosingPointCreate | DosingPointUpdate, process_line_id: int, display_order: int) -> tuple[Any, ...]:
+    return (
+        process_line_id,
+        payload.name,
+        payload.code,
+        int(payload.enabled),
+        payload.flow_source or "line",
+        payload.in_flow_tag_id,
+        payload.in_tp_tag_id,
+        payload.in_ph_tag_id,
+        payload.out_flow_tag_id,
+        payload.out_tp_tag_id,
+        payload.in_flow_weight,
+        payload.reflux_flow_1_tag_id,
+        payload.reflux_flow_2_tag_id,
+        payload.pac_flow_tag_id,
+        payload.bio_orp1_tag_id,
+        payload.bio_orp2_tag_id,
+        payload.bio_orp3_tag_id,
+        payload.bio_orp4_tag_id,
+        payload.bio_do1_tag_id,
+        payload.bio_do2_tag_id,
+        payload.bio_mlss1_tag_id,
+        payload.bio_mlss2_tag_id,
+        payload.process_parameter_group_id,
+        int(any(getattr(payload, field) is not None for field in PROCESS_SOURCE_TAG_FIELDS)),
+        display_order,
+        int(payload.write_enabled or False),
+    )
 
 
 def source_tag_options(con, point_id: int) -> list[dict[str, Any]]:
@@ -296,11 +291,7 @@ def source_tag_options(con, point_id: int) -> list[dict[str, Any]]:
     return [row_to_dict(row) for row in rows]
 
 
-def validate_process_source_tags(
-    con,
-    payload: DosingPointCreate | DosingPointUpdate,
-    point_id: int | None = None,
-) -> None:
+def validate_process_source_tags(con, payload: DosingPointCreate | DosingPointUpdate, point_id: int | None = None) -> None:
     for field_name in PROCESS_SOURCE_TAG_FIELDS:
         tag_id = getattr(payload, field_name, None)
         if tag_id is None:
@@ -314,38 +305,37 @@ def validate_process_source_tags(
 
 
 def backfill_point_source_tags(con, point_id: int) -> None:
-    tags = con.execute(
-        "SELECT id, tag_code, tag_type FROM sensor_tags WHERE dosing_point_id=? ORDER BY id",
-        (point_id,),
-    ).fetchall()
+    tags = con.execute("SELECT id, tag_code, tag_type FROM sensor_tags WHERE dosing_point_id=? ORDER BY id", (point_id,)).fetchall()
     values = infer_process_source_tags(tags)
+    learning_fields = [field for field, *_ in LEARNING_SOURCE_TAG_DEFS]
     con.execute(
-        """
+        f"""
         UPDATE dosing_points
-        SET in_flow_tag_id=?, in_tp_tag_id=?, out_tp_tag_id=?, po4_tag_id=?, pac_flow_tag_id=?, source_configured=1
+        SET in_flow_tag_id=COALESCE(in_flow_tag_id, ?),
+            in_tp_tag_id=COALESCE(in_tp_tag_id, ?),
+            in_ph_tag_id=COALESCE(in_ph_tag_id, ?),
+            out_tp_tag_id=COALESCE(out_tp_tag_id, ?),
+            pac_flow_tag_id=COALESCE(pac_flow_tag_id, ?),
+            {", ".join(f"{field}=COALESCE({field}, ?)" for field in learning_fields)},
+            source_configured=1
         WHERE id=?
         """,
         (
             values["in_flow_tag_id"],
             values["in_tp_tag_id"],
+            values["in_ph_tag_id"],
             values["out_tp_tag_id"],
-            values["po4_tag_id"],
             values["pac_flow_tag_id"],
+            *(values[field] for field in learning_fields),
             point_id,
         ),
     )
 
 
-def assign_default_groups(con, point_id: int) -> None:
-    chemical = con.execute("SELECT id FROM chemical_groups ORDER BY id LIMIT 1").fetchone()
+def assign_default_group(con, point_id: int) -> None:
     params = con.execute("SELECT id FROM process_parameter_groups ORDER BY id LIMIT 1").fetchone()
-    if chemical:
-        con.execute("UPDATE dosing_points SET chemical_group_id=COALESCE(chemical_group_id, ?) WHERE id=?", (chemical["id"], point_id))
     if params:
-        con.execute(
-            "UPDATE dosing_points SET process_parameter_group_id=COALESCE(process_parameter_group_id, ?) WHERE id=?",
-            (params["id"], point_id),
-        )
+        con.execute("UPDATE dosing_points SET process_parameter_group_id=COALESCE(process_parameter_group_id, ?) WHERE id=?", (params["id"], point_id))
 
 
 def validate_dosing_point_payload(con, payload: DosingPointCreate | DosingPointUpdate, point_id: int | None = None) -> None:
@@ -360,15 +350,8 @@ def validate_dosing_point_payload(con, payload: DosingPointCreate | DosingPointU
     existing = con.execute("SELECT id FROM dosing_points WHERE code=?", (payload.code,)).fetchone()
     if existing and int(existing["id"]) != point_id:
         raise HTTPException(409, "投加点编码已存在")
-    if payload.chemical_group_id is not None:
-        chemical = con.execute("SELECT id FROM chemical_groups WHERE id=?", (payload.chemical_group_id,)).fetchone()
-        if not chemical:
-            raise HTTPException(422, "药剂组不存在")
     if payload.process_parameter_group_id is not None:
-        params = con.execute(
-            "SELECT id FROM process_parameter_groups WHERE id=?",
-            (payload.process_parameter_group_id,),
-        ).fetchone()
+        params = con.execute("SELECT id FROM process_parameter_groups WHERE id=?", (payload.process_parameter_group_id,)).fetchone()
         if not params:
             raise HTTPException(422, "工艺参数组不存在")
 
@@ -382,71 +365,26 @@ def resolve_process_line_id(con, process_line_id: int | None) -> int:
     return int(row["id"])
 
 
-def create_default_point_config(con, point_id: int, point_code: str) -> None:
+def create_default_point_tags(con, point_id: int, point_code: str) -> None:
     now = utc_now_iso()
-    con.execute(
-        """
-        INSERT INTO pac_configs(
-            dosing_point_id,pac_density_kg_l,al2o3_fraction,effective_factor,al_p_ratio,batch_id,updated_at
-        ) VALUES(?,?,?,?,?,?,?)
-        """,
-        (point_id, 1.20, 0.018, 0.90, 2.50, "新建批次", now),
-    )
-    con.execute(
-        """
-        INSERT INTO control_configs(
-            dosing_point_id,tp_target_mg_l,tp_safe_target_mg_l,tp_limit_mg_l,pac_min_l_h,pac_max_l_h,
-            single_step_change_ratio,max_increase_l_h_per_min,max_decrease_l_h_per_min,lag_minutes,
-            feedback_kp,feedback_min,feedback_max,feedback_window_minutes,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (point_id, 0.18, 0.16, 0.30, 0.0, 60.0, 0.15, 3.0, 2.0, 60, 0.25, 0.80, 1.30, 120, now),
-    )
-    tag_defs = [
-        ("Q", "流量", "m3/h", 3, 15, 0, 4000),
-        ("PO4_P", "投加前 PO4-P", "mg/L", 10, 60, 0, 20),
-        ("TP_BEFORE", "投加前 TP", "mg/L", 20, 120, 0, 20),
-        ("TP_OUT", "出水 TP", "mg/L", 30, 180, 0, 5),
-        ("PH", "pH", "", 10, 60, 3, 11),
-        ("PAC_ACTUAL", "PAC 实际", "L/h", 10, 60, 0, 200),
-        ("TURBIDITY", "浊度", "NTU", 30, 120, 0, 300),
-    ]
     con.executemany(
         """
         INSERT INTO sensor_tags(
             dosing_point_id,tag_code,tag_type,name,unit,stale_minutes,max_stale_minutes,min_value,max_value,source,enabled
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
         """,
-        [
-            (point_id, f"{point_code}_{tag_type}", tag_type, name, unit, stale, max_stale, min_v, max_v, "manual", 1)
-            for tag_type, name, unit, stale, max_stale, min_v, max_v in tag_defs
-        ],
+        [(point_id, f"{point_code}_{tag_type}", tag_type, name, unit, stale, max_stale, min_v, max_v, "s7comm", 1) for tag_type, name, unit, stale, max_stale, min_v, max_v in TAG_DEFS],
     )
-    for tag_type, default_value in {
-        "Q": 0,
-        "PO4_P": 0,
-        "TP_BEFORE": 0,
-        "TP_OUT": 0,
-        "PH": 7.2,
-        "PAC_ACTUAL": 0,
-        "TURBIDITY": 0,
-    }.items():
-        tag = con.execute(
-            "SELECT id, unit FROM sensor_tags WHERE dosing_point_id=? AND tag_type=?",
-            (point_id, tag_type),
-        ).fetchone()
+    defaults = {"Q": 0, "TP_BEFORE": 0, "TP_OUT": 0, "PH": 7.2, "PAC_ACTUAL": 0, "TURBIDITY": 0, "BIO_DO1": 2, "BIO_DO2": 2, "BIO_MLSS1": 3000, "BIO_MLSS2": 3000}
+    for tag_type, default_value in defaults.items():
+        tag = con.execute("SELECT id, unit FROM sensor_tags WHERE dosing_point_id=? AND tag_type=?", (point_id, tag_type)).fetchone()
         con.execute(
-            """
-            INSERT INTO sensor_samples(tag_id,value,unit,sample_time,receive_time,quality,source)
-            VALUES(?,?,?,?,?,?,?)
-            """,
-            (tag["id"], default_value, tag["unit"], now, now, "good", "manual"),
+            "INSERT INTO sensor_samples(tag_id,value,unit,sample_time,receive_time,quality,source) VALUES(?,?,?,?,?,?,?)",
+            (tag["id"], default_value, tag["unit"], now, now, "good", "s7comm"),
         )
+
 
 def rename_point_tag_codes(con, point_id: int, new_code: str) -> None:
     tags = con.execute("SELECT id, tag_type FROM sensor_tags WHERE dosing_point_id=?", (point_id,)).fetchall()
     for tag in tags:
-        con.execute(
-            "UPDATE sensor_tags SET tag_code=? WHERE id=?",
-            (f"{new_code}_{tag['tag_type']}", tag["id"]),
-        )
+        con.execute("UPDATE sensor_tags SET tag_code=? WHERE id=?", (f"{new_code}_{tag['tag_type']}", tag["id"]))

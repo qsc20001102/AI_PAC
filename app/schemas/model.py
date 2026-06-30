@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+ModelKind = Literal["tp_out_response"]
 
 
 class ModelPublishIn(BaseModel):
@@ -12,13 +17,12 @@ class ModelProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     dosing_point_id: int
     sample_interval_minutes: int = Field(default=5, ge=1, le=1440)
+    model_kind: ModelKind = "tp_out_response"
 
 
 class ModelProjectUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     sample_interval_minutes: int = Field(ge=1, le=1440)
-    output_min: float = Field(ge=0.1, le=5)
-    output_max: float = Field(ge=0.1, le=5)
 
 
 class ModelSampleImportIn(BaseModel):
@@ -33,6 +37,4 @@ class ModelSampleBulkDeleteIn(BaseModel):
 
 class ModelDeployIn(BaseModel):
     enabled: bool
-    output_min: float = Field(ge=0.1, le=5)
-    output_max: float = Field(ge=0.1, le=5)
     actor: str = "local"

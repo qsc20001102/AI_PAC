@@ -9,7 +9,6 @@ from fastapi import HTTPException
 from app.api.common import row_to_dict
 from app.database import db_session, utc_now_iso
 from app.schemas import CollectionTagUpdate
-from app.services.model_training import record_model_project_sample
 from app.services.plc import parse_s7_address, read_s7_value
 from app.services.plc_devices import plc_client_store
 from app.services.recommendation import calculate_for_point
@@ -60,24 +59,6 @@ async def collection_loop() -> None:
                 rows = collection_due_rows(con)
                 if rows:
                     poll_collection_rows(con, rows)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            continue
-
-
-async def model_recording_loop() -> None:
-    while True:
-        await asyncio.sleep(1)
-        try:
-            with db_session() as con:
-                rows = con.execute("SELECT * FROM model_projects WHERE recording_enabled=1 ORDER BY id").fetchall()
-                now = datetime.now().replace(microsecond=0)
-                for model in rows:
-                    last = parse_iso_dt(model["last_record_at"])
-                    if last and (now - last).total_seconds() < int(model["sample_interval_minutes"]) * 60:
-                        continue
-                    record_model_project_sample(con, model)
         except asyncio.CancelledError:
             raise
         except Exception:

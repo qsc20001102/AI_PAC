@@ -27,7 +27,7 @@ def export_recommendations() -> StreamingResponse:
     with db_session() as con:
         rows = con.execute(
             """
-            SELECT r.recommend_time, dp.name, r.mode, r.base_l_h, r.k_feedback, r.k_ai, r.final_l_h, r.quality
+            SELECT r.recommend_time, dp.name, r.mode, r.base_l_h, r.raw_l_h, r.limited_l_h, r.final_l_h, r.quality
             FROM recommendations r
             JOIN dosing_points dp ON dp.id=r.dosing_point_id
             ORDER BY r.recommend_time DESC
@@ -36,7 +36,7 @@ def export_recommendations() -> StreamingResponse:
         ).fetchall()
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["时间", "投加点", "模式", "基础值L/h", "K_feedback", "K_ai", "建议L/h", "质量"])
+    writer.writerow(["时间", "投加点", "模式", "保守公式L/h", "原始建议L/h", "限幅后L/h", "最终建议L/h", "质量"])
     for row in rows:
         writer.writerow(list(row))
     buf.seek(0)

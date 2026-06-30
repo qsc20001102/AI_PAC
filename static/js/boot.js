@@ -58,7 +58,6 @@ async function renderPage() {
   }
   if (state.activePage === "overview") return renderOverview(main);
   if (state.activePage === "process") return renderProcess(main);
-  if (state.activePage === "chemical") return renderChemical(main);
   if (state.activePage === "processParams") return renderProcessParams(main);
   if (state.activePage === "data") return renderData(main);
   if (state.activePage === "trends") return renderTrends(main);

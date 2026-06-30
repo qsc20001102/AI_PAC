@@ -66,12 +66,13 @@
 
 function metricCard(rec) {
   const data = rec.data || {};
-  const mode = rec.mode === "conservative" && data.TP_OUT?.status === "stale" ? "stale" : rec.mode;
-  const configured = [data.Q, data.IN_Q, data.PO4_P, data.TP_BEFORE, data.TP_OUT, data.PAC_ACTUAL].filter(Boolean);
+  const mode = rec.mode;
+  const configured = [data.Q, data.IN_Q, data.TP_BEFORE, data.TP_OUT, data.PAC_ACTUAL].filter(Boolean);
   const latest = configured
     .filter((item) => item.sample_time)
     .sort((a, b) => new Date(b.sample_time) - new Date(a.sample_time))[0];
   const time = latest?.source === "manual" ? "手动" : dateSecond(latest?.sample_time || rec.recommend_time);
+  const predictedTp = rec.tp_forecast?.predicted_tp_out ?? rec.tp_forecast?.predictions?.["60"];
   return `
     <article class="panel metric-card ${rec.dosing_point_id === state.selectedPointId ? "selected" : ""}" data-point-id="${rec.dosing_point_id}">
       <div class="card-top">
@@ -80,12 +81,12 @@ function metricCard(rec) {
       </div>
       <div class="metric-value">${fmt(rec.final_l_h, 1)}<small>L/h</small></div>
       <table class="mini-table">
-        <thead><tr><th>参与流量</th><th>进水流量</th><th>正磷酸盐</th><th>出水TP</th><th>加药流量</th></tr></thead>
+        <thead><tr><th>参考流量</th><th>进水TP</th><th>出水TP</th><th>预测TP</th><th>加药流量</th></tr></thead>
         <tbody><tr>
           <td>${fmtCompact(data.Q?.value, 0)}</td>
-          <td>${fmtCompact(data.IN_Q?.value, 0)}</td>
-          <td>${fmtCompact(data.PO4_P?.value, 2)}</td>
+          <td>${fmtCompact(data.TP_BEFORE?.value, 2)}</td>
           <td>${fmtCompact(data.TP_OUT?.value, 2)}</td>
+          <td>${fmtCompact(predictedTp, 2)}</td>
           <td>${fmtCompact(data.PAC_ACTUAL?.value, 1)}</td>
         </tr></tbody>
       </table>
@@ -96,19 +97,28 @@ function metricCard(rec) {
 
 function explainBlock(rec) {
   if (!rec) return `<div class="empty">暂无推荐结果</div>`;
+  const forecastText = tpForecastText(rec.tp_forecast);
   return `
     <div class="formula">
-      <div class="formula-box"><div class="formula-label">机理基础值</div><div class="formula-number">${fmt(rec.base_l_h, 1)}</div><div class="formula-unit">L/h</div></div>
-      <div class="operator">×</div>
-      <div class="formula-box"><div class="formula-label">K_feedback</div><div class="formula-number">${fmt(rec.k_feedback, 2)}</div></div>
-      <div class="operator">×</div>
-      <div class="formula-box"><div class="formula-label">K_ai</div><div class="formula-number">${fmt(rec.k_ai, 2)}</div></div>
+      <div class="formula-box"><div class="formula-label">保守公式</div><div class="formula-number">${fmt(rec.base_l_h, 1)}</div><div class="formula-unit">L/h</div></div>
+      <div class="operator">→</div>
+      <div class="formula-box"><div class="formula-label">原始建议</div><div class="formula-number">${fmt(rec.raw_l_h, 1)}</div><div class="formula-unit">L/h</div></div>
       <div class="operator">→</div>
       <div class="formula-box"><div class="formula-label">限幅后</div><div class="formula-number">${fmt(rec.final_l_h, 1)}</div><div class="formula-unit">L/h</div></div>
     </div>
+    ${forecastText ? `<div class="muted" style="margin-bottom:10px">${forecastText}</div>` : ""}
     <div class="muted" style="font-weight:700;margin-bottom:10px">推荐理由</div>
     <div class="reason-tags">${rec.reasons.slice(0, 6).map((reason) => `<span class="reason">${icon("i-check")}${htmlEscape(reason)}</span>`).join("")}</div>
   `;
+}
+
+function tpForecastText(forecast) {
+  if (!forecast) return "";
+  if (forecast.predictions) {
+    return `预测出水TP：30min ${fmtCompact(forecast.predictions["30"], 4)} mg/L，60min ${fmtCompact(forecast.predictions["60"], 4)} mg/L，120min ${fmtCompact(forecast.predictions["120"], 4)} mg/L`;
+  }
+  if (forecast.predicted_tp_out == null) return "";
+  return `预测 ${forecast.horizon_minutes} min 后出水TP：${fmtCompact(forecast.predicted_tp_out, 4)} mg/L`;
 }
 
 function overviewQualityScope() {
@@ -210,7 +220,7 @@ function modelSmallPanel() {
             <div class="model-overview-name" title="${htmlEscape(model.name)}">${htmlEscape(model.name)}</div>
             <span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span>
             <div class="model-overview-meta">${htmlEscape(model.dosing_point_name)} · ${model.sample_count || 0} 条</div>
-            <div class="model-overview-meta">R² ${fmtCompact(metrics.R2, 4)} · MAE ${fmtCompact(metrics.MAE, 4)} · K_AI ${fmtCompact(model.output_min, 2)}~${fmtCompact(model.output_max, 2)}</div>
+            <div class="model-overview-meta">${modelKindLabel(model)} · R² ${fmtCompact(metrics.R2, 4)} · MAE ${fmtCompact(metrics.MAE, 4)}</div>
           </div>`;
         }).join("")}</div>` : '<div class="empty">暂无训练模型</div>'}
       </div>
@@ -248,7 +258,7 @@ function wireJumpButtons() {
 async function loadAndDrawTrend(canvasId, legendId, pointId, hours) {
   const trend = await api(`/api/trends?dosing_point_id=${pointId}&hours=${hours}`);
   state.trendCache = trend;
-  const keys = ["TP_BEFORE", "TP_OUT", "PO4_P"].filter((key) => Object.hasOwn(trend.series || {}, key));
+  const keys = ["TP_BEFORE", "TP_OUT", "PAC_ACTUAL"].filter((key) => Object.hasOwn(trend.series || {}, key));
   state.trendKeys = keys;
   const legend = document.getElementById(legendId);
   if (legend) legend.innerHTML = keys.length

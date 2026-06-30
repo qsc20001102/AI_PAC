@@ -9,21 +9,24 @@ class DosingPointCreate(BaseModel):
     code: str = Field(min_length=1, max_length=60)
     enabled: bool = True
     flow_source: str | None = "line"
-    phosphorus_source: str | None = "po4_priority"
-    feedback_source: str | None = "line_out"
     in_flow_tag_id: int | None = None
     in_tp_tag_id: int | None = None
+    in_ph_tag_id: int | None = None
     out_flow_tag_id: int | None = None
     out_tp_tag_id: int | None = None
-    zone_flow_tag_id: int | None = None
-    in_flow_weight: float = Field(default=1.0, ge=0, le=1)
+    in_flow_weight: float = Field(default=1.0, ge=0)
     reflux_flow_1_tag_id: int | None = None
     reflux_flow_2_tag_id: int | None = None
-    po4_tag_id: int | None = None
     pac_flow_tag_id: int | None = None
-    chemical_group_id: int | None = None
+    bio_orp1_tag_id: int | None = None
+    bio_orp2_tag_id: int | None = None
+    bio_orp3_tag_id: int | None = None
+    bio_orp4_tag_id: int | None = None
+    bio_do1_tag_id: int | None = None
+    bio_do2_tag_id: int | None = None
+    bio_mlss1_tag_id: int | None = None
+    bio_mlss2_tag_id: int | None = None
     process_parameter_group_id: int | None = None
-    manual_contribution_factor: float | None = Field(default=1.0, ge=0, le=5)
     display_order: int | None = Field(default=0, ge=0, le=10000)
     write_enabled: bool = False
 
@@ -34,32 +37,26 @@ class DosingPointUpdate(BaseModel):
     code: str = Field(min_length=1, max_length=60)
     enabled: bool
     flow_source: str | None = None
-    phosphorus_source: str | None = None
-    feedback_source: str | None = None
     in_flow_tag_id: int | None = None
     in_tp_tag_id: int | None = None
+    in_ph_tag_id: int | None = None
     out_flow_tag_id: int | None = None
     out_tp_tag_id: int | None = None
-    zone_flow_tag_id: int | None = None
-    in_flow_weight: float = Field(default=1.0, ge=0, le=1)
+    in_flow_weight: float = Field(default=1.0, ge=0)
     reflux_flow_1_tag_id: int | None = None
     reflux_flow_2_tag_id: int | None = None
-    po4_tag_id: int | None = None
     pac_flow_tag_id: int | None = None
-    chemical_group_id: int | None = None
+    bio_orp1_tag_id: int | None = None
+    bio_orp2_tag_id: int | None = None
+    bio_orp3_tag_id: int | None = None
+    bio_orp4_tag_id: int | None = None
+    bio_do1_tag_id: int | None = None
+    bio_do2_tag_id: int | None = None
+    bio_mlss1_tag_id: int | None = None
+    bio_mlss2_tag_id: int | None = None
     process_parameter_group_id: int | None = None
-    manual_contribution_factor: float | None = Field(default=None, ge=0, le=5)
     display_order: int | None = Field(default=None, ge=0, le=10000)
     write_enabled: bool | None = None
-
-
-class ManualSampleIn(BaseModel):
-    dosing_point_id: int
-    tag_type: str
-    value: float
-    sample_time: str | None = None
-    operator: str = "local"
-    note: str | None = None
 
 
 class IngestSampleIn(BaseModel):

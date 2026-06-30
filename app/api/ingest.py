@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.api.common import row_to_dict
 from app.database import db_session, utc_now_iso
-from app.schemas import CsvImportIn, IngestBatchIn, IngestSampleIn, ManualSampleIn
+from app.schemas import CsvImportIn, IngestBatchIn, IngestSampleIn
 from app.services.audit import audit
 from app.services.collection_data import refresh_local_simulated_samples, write_ingested_samples
 from app.services.recommendation import calculate_for_point, recalculate_all
@@ -102,31 +102,3 @@ def demo_collector_poll() -> dict[str, Any]:
         )
     return {"ok": True, "recommendations": recs}
 
-
-@router.post("/api/manual-samples")
-def add_manual_sample(payload: ManualSampleIn) -> dict[str, Any]:
-    sample_time = payload.sample_time or utc_now_iso()
-    with db_session() as con:
-        tag = con.execute(
-            "SELECT * FROM sensor_tags WHERE dosing_point_id=? AND tag_type=?",
-            (payload.dosing_point_id, payload.tag_type),
-        ).fetchone()
-        if not tag:
-            raise HTTPException(404, "标签不存在")
-        con.execute(
-            """
-            INSERT INTO manual_samples(tag_id,value,unit,sample_time,operator,note,created_at)
-            VALUES(?,?,?,?,?,?,?)
-            """,
-            (tag["id"], payload.value, tag["unit"], sample_time, payload.operator, payload.note, utc_now_iso()),
-        )
-        con.execute(
-            """
-            INSERT OR REPLACE INTO sensor_samples(tag_id,value,unit,sample_time,receive_time,quality,source)
-            VALUES(?,?,?,?,?,?,?)
-            """,
-            (tag["id"], payload.value, tag["unit"], sample_time, utc_now_iso(), "good", "manual"),
-        )
-        audit(con, payload.operator, "create", "manual_sample", str(tag["id"]), payload.model_dump())
-        result = calculate_for_point(con, payload.dosing_point_id)
-    return {"ok": True, "recommendation": result}

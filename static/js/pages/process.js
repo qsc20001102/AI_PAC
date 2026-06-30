@@ -1,8 +1,5 @@
-﻿async function renderProcess(main) {
-  const [chemicalGroups, processParameterGroups] = await Promise.all([
-    api("/api/chemical-groups"),
-    api("/api/process-parameter-groups"),
-  ]);
+async function renderProcess(main) {
+  const processParameterGroups = await api("/api/process-parameter-groups");
   const rows = state.points.map((p) => `
     <div class="list-card ${!state.editingNewPoint && p.id === state.selectedPointId ? "active" : ""}" data-point-select="${p.id}">
       <div style="font-weight:800">${htmlEscape(p.name)}</div>
@@ -14,10 +11,7 @@
   main.innerHTML = `
     <section class="page-grid process-page-grid">
       <aside class="panel">
-        <div class="panel-header">
-          <div class="panel-title">投加点</div>
-          <button id="newPointBtn" class="btn ghost" type="button">新增</button>
-        </div>
+        <div class="panel-header"><div class="panel-title">投加点</div><button id="newPointBtn" class="btn ghost" type="button">新增</button></div>
         <div class="panel-body process-point-list">${rows}</div>
       </aside>
       <article class="panel">
@@ -31,15 +25,11 @@
               ${field("name", "投加点名称", p.name, "text")}
               ${field("code", "投加点编码", p.code, "text")}
               ${selectField("enabled", "启用状态", [{ value: "true", label: "启用" }, { value: "false", label: "停用" }], String(Boolean(p.enabled)))}
-            </div>
-            <div class="process-source-title">关联参数组</div>
-            <div class="form-grid">
-              ${selectField("chemical_group_id", "药剂组", chemicalGroups.map((group) => ({ value: String(group.id), label: group.batch_id })), p.chemical_group_id == null ? "" : String(p.chemical_group_id))}
               ${selectField("process_parameter_group_id", "工艺参数组", processParameterGroups.map((group) => ({ value: String(group.id), label: group.name })), p.process_parameter_group_id == null ? "" : String(p.process_parameter_group_id))}
             </div>
             <div class="process-source-title">数据来源配置</div>
             <div class="form-grid process-source-grid">
-              ${numberField("in_flow_weight", "进水流量权重", p.in_flow_weight ?? 1, "0", "1", "0.01")}
+              ${numberField("in_flow_weight", "进水流量权重", p.in_flow_weight ?? 1, "0", null, "0.01")}
               ${processSourceFields.map(([name, label]) => processSourceSelect(name, label, p)).join("")}
             </div>
             <div class="btn-row">
@@ -69,59 +59,6 @@
   document.getElementById("deletePointBtn")?.addEventListener("click", deleteSelectedPoint);
 }
 
-async function renderChemical(main) {
-  const groups = await api("/api/chemical-groups");
-  if (!groups.length) {
-    main.innerHTML = `<div class="empty">暂无药剂组</div>`;
-    return;
-  }
-  if (!groups.some((group) => group.id === state.selectedChemicalGroupId)) {
-    state.selectedChemicalGroupId = groups[0].id;
-  }
-  const current = groups.find((group) => group.id === state.selectedChemicalGroupId) || groups[0];
-  main.innerHTML = `
-    <section class="page-grid process-page-grid">
-      <aside class="panel">
-        <div class="panel-header">
-          <div class="panel-title">药剂组</div>
-          <button id="newChemicalGroupBtn" class="btn ghost" type="button">新增</button>
-        </div>
-        <div class="panel-body process-point-list">
-          ${groups.map((group) => `
-            <div class="list-card ${group.id === current.id ? "active" : ""}" data-chemical-group="${group.id}">
-              <div style="font-weight:800">${htmlEscape(group.batch_id)}</div>
-            </div>
-          `).join("")}
-        </div>
-      </aside>
-      <article class="panel">
-        <div class="panel-header">
-          <div class="panel-title">药剂参数</div>
-          <button id="deleteChemicalGroupBtn" class="btn" type="button">删除药剂组</button>
-        </div>
-        <div class="panel-body">
-          <form id="chemicalGroupForm">
-            <div class="form-grid">
-              ${field("batch_id", "药剂批次", current.batch_id, "text")}
-              ${numberField("pac_density_kg_l", "PAC密度", current.pac_density_kg_l, "0.01", "2", "0.001")}
-              ${numberField("al_p_ratio", "摩尔比", current.al_p_ratio, "0.1", "8", "0.01")}
-              ${numberField("effective_factor", "系数", current.effective_factor, "0.01", "1.5", "0.01")}
-            </div>
-            <div class="btn-row"><button class="btn primary" type="submit">${icon("i-save")}保存药剂参数</button><span class="muted">保存后会重新计算关联投加点的建议值。</span></div>
-          </form>
-        </div>
-      </article>
-    </section>
-  `;
-  document.querySelectorAll("[data-chemical-group]").forEach((node) => node.addEventListener("click", async () => {
-    state.selectedChemicalGroupId = Number(node.dataset.chemicalGroup);
-    await renderPage();
-  }));
-  document.getElementById("newChemicalGroupBtn").addEventListener("click", createChemicalGroup);
-  document.getElementById("deleteChemicalGroupBtn").addEventListener("click", deleteChemicalGroup);
-  document.getElementById("chemicalGroupForm").addEventListener("submit", saveChemicalGroup);
-}
-
 async function renderProcessParams(main) {
   const groups = await api("/api/process-parameter-groups");
   if (!groups.length) {
@@ -132,13 +69,11 @@ async function renderProcessParams(main) {
     state.selectedProcessParameterGroupId = groups[0].id;
   }
   const current = groups.find((group) => group.id === state.selectedProcessParameterGroupId) || groups[0];
+  const curve = normalizeCurve(current.unit_dose_curve);
   main.innerHTML = `
     <section class="page-grid process-page-grid">
       <aside class="panel">
-        <div class="panel-header">
-          <div class="panel-title">参数组</div>
-          <button id="newProcessParamGroupBtn" class="btn ghost" type="button">新增</button>
-        </div>
+        <div class="panel-header"><div class="panel-title">参数组</div><button id="newProcessParamGroupBtn" class="btn ghost" type="button">新增</button></div>
         <div class="panel-body process-point-list">
           ${groups.map((group) => `
             <div class="list-card ${group.id === current.id ? "active" : ""}" data-process-param-group="${group.id}">
@@ -148,29 +83,31 @@ async function renderProcessParams(main) {
         </div>
       </aside>
       <article class="panel">
-        <div class="panel-header">
-          <div class="panel-title">工艺参数</div>
-          <button id="deleteProcessParamGroupBtn" class="btn" type="button">删除参数组</button>
-        </div>
+        <div class="panel-header"><div class="panel-title">工艺参数</div><button id="deleteProcessParamGroupBtn" class="btn" type="button">删除参数组</button></div>
         <div class="panel-body">
           <form id="processParamGroupForm">
             <div class="form-grid">
               ${field("name", "参数组名称", current.name, "text")}
-              ${numberField("tp_target_mg_l", "目标TP <", current.tp_target_mg_l, "0", "5", "0.001")}
-              ${numberField("tp_limit_mg_l", "出水限制", current.tp_limit_mg_l, "0", "10", "0.001")}
+              ${numberField("tp_target_mg_l", "目标TP", current.tp_target_mg_l, "0", "5", "0.001")}
+              ${numberField("tp_upper_mg_l", "出水TP上限", current.tp_upper_mg_l ?? current.tp_limit_mg_l, "0", "10", "0.001")}
+              ${numberField("pac_density_kg_l", "药剂密度(kg/L)", current.pac_density_kg_l ?? 1.2, "0.01", "2", "0.001")}
               ${numberField("pac_min_l_h", "最小 L/h", current.pac_min_l_h, "0", "500", "0.01")}
               ${numberField("pac_max_l_h", "最大 L/h", current.pac_max_l_h, "0", "1000", "0.01")}
               ${numberField("calculation_interval_seconds", "计算周期(s)", current.calculation_interval_seconds, "5", "86400", "1")}
+              ${selectField("forecast_horizon_minutes", "出水TP预测时长(min)", [
+                { value: "30", label: "30 分钟" },
+                { value: "60", label: "60 分钟" },
+                { value: "120", label: "120 分钟" },
+              ], String(current.forecast_horizon_minutes ?? 120))}
             </div>
-            <div class="process-source-title">反馈参数</div>
-            <div class="form-grid">
-              ${numberField("lag_minutes", "滞后分钟", current.lag_minutes, "0", "360", "1")}
-              ${numberField("feedback_kp", "反馈Kp", current.feedback_kp, "0", "2", "0.01")}
-              ${numberField("feedback_min", "反馈下限", current.feedback_min, "0.1", "2", "0.01")}
-              ${numberField("feedback_max", "反馈上限", current.feedback_max, "0.1", "2", "0.01")}
-              ${numberField("feedback_window_minutes", "反馈窗口分钟", current.feedback_window_minutes, "5", "720", "1")}
+            <div class="process-source-title">单耗配置曲线</div>
+            <div id="unitDoseCurveRows" class="curve-editor">
+              ${curve.map((point, index) => curveRow(point, index)).join("")}
             </div>
-            <div class="btn-row"><button class="btn primary" type="submit">${icon("i-save")}保存工艺参数</button><span class="muted">这些参数会影响建议值上下限、超限保护和滞后反馈修正。</span></div>
+            <div class="btn-row">
+              <button id="addCurvePointBtn" class="btn ghost" type="button">增加关键点</button>
+              <button class="btn primary" type="submit">${icon("i-save")}保存工艺参数</button>
+            </div>
           </form>
         </div>
       </article>
@@ -182,7 +119,42 @@ async function renderProcessParams(main) {
   }));
   document.getElementById("newProcessParamGroupBtn").addEventListener("click", createProcessParameterGroup);
   document.getElementById("deleteProcessParamGroupBtn").addEventListener("click", deleteProcessParameterGroup);
+  document.getElementById("addCurvePointBtn").addEventListener("click", addCurvePoint);
+  document.querySelectorAll("[data-curve-delete]").forEach((node) => node.addEventListener("click", deleteCurvePoint));
   document.getElementById("processParamGroupForm").addEventListener("submit", saveProcessParameterGroup);
+}
+
+function defaultCurve() {
+  return [{ tp_mg_l: 0, dose_mg_l: 0 }, { tp_mg_l: 0.3, dose_mg_l: 30 }, { tp_mg_l: 0.5, dose_mg_l: 60 }, { tp_mg_l: 1, dose_mg_l: 100 }];
+}
+
+function normalizeCurve(curve) {
+  return Array.isArray(curve) && curve.length >= 2 ? curve : defaultCurve();
+}
+
+function curveRow(point, index) {
+  return `
+    <div class="curve-row" data-curve-row>
+      <label>出水TP<input name="curve_tp" type="number" min="0" max="20" step="0.001" value="${htmlEscape(point.tp_mg_l)}"></label>
+      <label>设定单耗<input name="curve_dose" type="number" min="0" max="10000" step="0.001" value="${htmlEscape(point.dose_mg_l)}"></label>
+      <button class="btn ghost" type="button" data-curve-delete="${index}">删除</button>
+    </div>
+  `;
+}
+
+function addCurvePoint() {
+  const container = document.getElementById("unitDoseCurveRows");
+  container.insertAdjacentHTML("beforeend", curveRow({ tp_mg_l: "", dose_mg_l: "" }, container.querySelectorAll("[data-curve-row]").length));
+  container.querySelectorAll("[data-curve-delete]").forEach((node) => node.addEventListener("click", deleteCurvePoint));
+}
+
+function deleteCurvePoint(event) {
+  const rows = document.querySelectorAll("[data-curve-row]");
+  if (rows.length <= 2) {
+    showToast("单耗曲线至少保留 2 个关键点");
+    return;
+  }
+  event.currentTarget.closest("[data-curve-row]")?.remove();
 }
 
 function metricMini(p) {
@@ -197,22 +169,25 @@ function defaultNewPoint() {
     code: `PAC_NEW_${next}`,
     enabled: true,
     flow_source: "line",
-    phosphorus_source: "po4_priority",
-    feedback_source: "line_out",
     in_flow_tag_id: null,
     in_tp_tag_id: null,
+    in_ph_tag_id: null,
     out_flow_tag_id: null,
     out_tp_tag_id: null,
-    zone_flow_tag_id: null,
     in_flow_weight: 1,
     reflux_flow_1_tag_id: null,
     reflux_flow_2_tag_id: null,
-    po4_tag_id: null,
     pac_flow_tag_id: null,
-    chemical_group_id: null,
+    bio_orp1_tag_id: null,
+    bio_orp2_tag_id: null,
+    bio_orp3_tag_id: null,
+    bio_orp4_tag_id: null,
+    bio_do1_tag_id: null,
+    bio_do2_tag_id: null,
+    bio_mlss1_tag_id: null,
+    bio_mlss2_tag_id: null,
     process_parameter_group_id: null,
     source_tags: [],
-    manual_contribution_factor: 1,
     display_order: next,
     write_enabled: false,
   };
@@ -237,30 +212,16 @@ function selectField(name, label, options, value) {
   `;
 }
 
-function pointBackendSummary(p) {
-  const rec = p.latest_recommendation;
-  return `
-    <hr style="border:0;border-top:1px solid var(--line-soft);margin:18px 0">
-    <div class="kv">
-      <div class="kv-label">当前建议</div><div>${fmt(rec?.final_l_h, 2)} L/h · ${htmlEscape(rec?.mode || "未计算")}</div>
-      <div class="kv-label">PAC批次</div><div>${htmlEscape(p.pac_config?.batch_id || "未配置")}</div>
-      <div class="kv-label">目标TP</div><div>${fmtCompact(p.control_config?.tp_target_mg_l, 3)} mg/L</div>
-    </div>
-  `;
-}
-
 function pointFormPayload(form) {
   const payload = formObject(form);
   payload.enabled = payload.enabled === "true";
   payload.code = String(payload.code || "").trim();
   payload.name = String(payload.name || "").trim();
-  payload.in_flow_weight = Math.max(0, Math.min(1, Number(payload.in_flow_weight ?? 1)));
+  payload.in_flow_weight = Math.max(0, Number(payload.in_flow_weight ?? 1));
   processSourceFields.forEach(([name]) => {
     payload[name] = payload[name] == null ? null : Number(payload[name]);
   });
-  ["chemical_group_id", "process_parameter_group_id"].forEach((name) => {
-    payload[name] = payload[name] == null ? null : Number(payload[name]);
-  });
+  payload.process_parameter_group_id = payload.process_parameter_group_id == null ? null : Number(payload.process_parameter_group_id);
   return payload;
 }
 
@@ -304,101 +265,35 @@ function field(name, label, value, type = "number") {
 }
 
 function numberField(name, label, value, min, max, step = "any") {
-  return `<div class="field"><label for="${name}">${label}</label><input id="${name}" name="${name}" type="number" min="${min}" max="${max}" step="${step}" value="${htmlEscape(value)}"></div>`;
+  const minAttr = min == null ? "" : ` min="${htmlEscape(min)}"`;
+  const maxAttr = max == null ? "" : ` max="${htmlEscape(max)}"`;
+  return `<div class="field"><label for="${name}">${label}</label><input id="${name}" name="${name}" type="number"${minAttr}${maxAttr} step="${step}" value="${htmlEscape(value)}"></div>`;
 }
 
 function formObject(form) {
   const out = {};
   new FormData(form).forEach((value, key) => {
-    out[key] = value === "" ? null : (Number.isFinite(Number(value)) && !String(key).includes("batch") ? Number(value) : value);
+    out[key] = value === "" ? null : (Number.isFinite(Number(value)) ? Number(value) : value);
   });
   return out;
 }
 
-async function saveConfig(event, type) {
-  event.preventDefault();
-  try {
-    const payload = formObject(event.currentTarget);
-    const path = type === "pac" ? "pac-config" : "control-config";
-    await api(`/api/dosing-points/${state.selectedPointId}/${path}`, { method: "PUT", body: JSON.stringify(payload) });
-    showToast("配置已保存并重新计算");
-    await refreshAll();
-  } catch (err) {
-    showToast(`保存失败：${err.message}`);
-  }
-}
-
-function chemicalGroupPayload(form) {
-  return {
-    batch_id: String(form.elements.batch_id.value || "").trim(),
-    pac_density_kg_l: Number(form.elements.pac_density_kg_l.value),
-    al_p_ratio: Number(form.elements.al_p_ratio.value),
-    effective_factor: Number(form.elements.effective_factor.value),
-  };
-}
-
 function processParameterGroupPayload(form) {
+  const curve = Array.from(form.querySelectorAll("[data-curve-row]")).map((row) => ({
+    tp_mg_l: Number(row.querySelector('[name="curve_tp"]').value),
+    dose_mg_l: Number(row.querySelector('[name="curve_dose"]').value),
+  }));
   return {
     name: String(form.elements.name.value || "").trim(),
     tp_target_mg_l: Number(form.elements.tp_target_mg_l.value),
-    tp_limit_mg_l: Number(form.elements.tp_limit_mg_l.value),
+    tp_upper_mg_l: Number(form.elements.tp_upper_mg_l.value),
+    pac_density_kg_l: Number(form.elements.pac_density_kg_l.value),
     pac_min_l_h: Number(form.elements.pac_min_l_h.value),
     pac_max_l_h: Number(form.elements.pac_max_l_h.value),
     calculation_interval_seconds: Number(form.elements.calculation_interval_seconds.value),
-    lag_minutes: Number(form.elements.lag_minutes.value),
-    feedback_kp: Number(form.elements.feedback_kp.value),
-    feedback_min: Number(form.elements.feedback_min.value),
-    feedback_max: Number(form.elements.feedback_max.value),
-    feedback_window_minutes: Number(form.elements.feedback_window_minutes.value),
+    forecast_horizon_minutes: Number(form.elements.forecast_horizon_minutes.value),
+    unit_dose_curve: curve,
   };
-}
-
-async function createChemicalGroup() {
-  try {
-    const suffix = Date.now().toString().slice(-6);
-    const group = await api("/api/chemical-groups", {
-      method: "POST",
-      body: JSON.stringify({
-        batch_id: `新药剂批次${suffix}`,
-        pac_density_kg_l: 1.2,
-        al_p_ratio: 2.5,
-        effective_factor: 0.9,
-      }),
-    });
-    state.selectedChemicalGroupId = group.id;
-    showToast("药剂组已新增");
-    await refreshAll();
-  } catch (err) {
-    showToast(`新增失败：${err.message}`);
-  }
-}
-
-async function saveChemicalGroup(event) {
-  event.preventDefault();
-  try {
-    await api(`/api/chemical-groups/${state.selectedChemicalGroupId}`, {
-      method: "PUT",
-      body: JSON.stringify(chemicalGroupPayload(event.currentTarget)),
-    });
-    showToast("药剂参数已保存并重新计算");
-    await refreshAll();
-  } catch (err) {
-    showToast(`保存失败：${err.message}`);
-  }
-}
-
-async function deleteChemicalGroup() {
-  const groups = await api("/api/chemical-groups");
-  const current = groups.find((group) => group.id === state.selectedChemicalGroupId);
-  if (!current || !window.confirm(`确认删除药剂组「${current.batch_id}」？其关联投加点会自动切换到保留的药剂组。`)) return;
-  try {
-    await api(`/api/chemical-groups/${current.id}`, { method: "DELETE" });
-    state.selectedChemicalGroupId = null;
-    showToast("药剂组已删除，关联投加点已自动重分配");
-    await refreshAll();
-  } catch (err) {
-    showToast(`删除失败：${err.message}`);
-  }
 }
 
 async function createProcessParameterGroup() {
@@ -409,15 +304,13 @@ async function createProcessParameterGroup() {
       body: JSON.stringify({
         name: `工艺参数${suffix}`,
         tp_target_mg_l: 0.18,
-        tp_limit_mg_l: 0.3,
+        tp_upper_mg_l: 0.3,
+        pac_density_kg_l: 1.2,
         pac_min_l_h: 0,
         pac_max_l_h: 60,
         calculation_interval_seconds: 60,
-        lag_minutes: 60,
-        feedback_kp: 0.25,
-        feedback_min: 0.8,
-        feedback_max: 1.3,
-        feedback_window_minutes: 120,
+        forecast_horizon_minutes: 120,
+        unit_dose_curve: defaultCurve(),
       }),
     });
     state.selectedProcessParameterGroupId = group.id;

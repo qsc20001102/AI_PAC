@@ -13,6 +13,24 @@ DATA_DIR = BASE_DIR / "data"
 BACKUP_DIR = BASE_DIR / "backup"
 DB_PATH = DATA_DIR / "ai_pac.sqlite"
 
+LEARNING_SOURCE_TAG_DEFS = [
+    ("bio_orp1_tag_id", "BIO_ORP1", "生化池ORP1", "mV", 10, 60, -1000, 1000, 0),
+    ("bio_orp2_tag_id", "BIO_ORP2", "生化池ORP2", "mV", 10, 60, -1000, 1000, 0),
+    ("bio_orp3_tag_id", "BIO_ORP3", "生化池ORP3", "mV", 10, 60, -1000, 1000, 0),
+    ("bio_orp4_tag_id", "BIO_ORP4", "生化池ORP4", "mV", 10, 60, -1000, 1000, 0),
+    ("bio_do1_tag_id", "BIO_DO1", "生化池DO1", "mg/L", 10, 60, 0, 20, 2),
+    ("bio_do2_tag_id", "BIO_DO2", "生化池DO2", "mg/L", 10, 60, 0, 20, 2),
+    ("bio_mlss1_tag_id", "BIO_MLSS1", "生化池MLSS1", "mg/L", 30, 120, 0, 20000, 3000),
+    ("bio_mlss2_tag_id", "BIO_MLSS2", "生化池MLSS2", "mg/L", 30, 120, 0, 20000, 3000),
+]
+
+DEFAULT_UNIT_DOSE_CURVE = [
+    {"tp_mg_l": 0.0, "dose_mg_l": 0.0},
+    {"tp_mg_l": 0.3, "dose_mg_l": 30.0},
+    {"tp_mg_l": 0.5, "dose_mg_l": 60.0},
+    {"tp_mg_l": 1.0, "dose_mg_l": 100.0},
+]
+
 
 def utc_now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
@@ -87,6 +105,7 @@ CREATE TABLE IF NOT EXISTS dosing_points (
     feedback_source TEXT NOT NULL DEFAULT 'line_out',
     in_flow_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     in_tp_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    in_ph_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     out_flow_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     out_tp_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     zone_flow_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
@@ -95,6 +114,14 @@ CREATE TABLE IF NOT EXISTS dosing_points (
     reflux_flow_2_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     po4_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     pac_flow_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    bio_orp1_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    bio_orp2_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    bio_orp3_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    bio_orp4_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    bio_do1_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    bio_do2_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    bio_mlss1_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    bio_mlss2_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     source_configured INTEGER NOT NULL DEFAULT 0,
     chemical_group_id INTEGER REFERENCES chemical_groups(id) ON DELETE SET NULL,
     process_parameter_group_id INTEGER REFERENCES process_parameter_groups(id) ON DELETE SET NULL,
@@ -107,6 +134,7 @@ CREATE TABLE IF NOT EXISTS chemical_groups (
     id INTEGER PRIMARY KEY,
     batch_id TEXT NOT NULL UNIQUE,
     pac_density_kg_l REAL NOT NULL,
+    al2o3_fraction REAL NOT NULL,
     effective_factor REAL NOT NULL,
     al_p_ratio REAL NOT NULL,
     updated_at TEXT NOT NULL
@@ -117,9 +145,15 @@ CREATE TABLE IF NOT EXISTS process_parameter_groups (
     name TEXT NOT NULL UNIQUE,
     tp_target_mg_l REAL NOT NULL,
     tp_limit_mg_l REAL NOT NULL,
+    tp_upper_mg_l REAL NOT NULL DEFAULT 0.3,
+    pac_density_kg_l REAL NOT NULL DEFAULT 1.2,
+    unit_dose_curve_json TEXT NOT NULL DEFAULT '[{"tp_mg_l":0.0,"dose_mg_l":0.0},{"tp_mg_l":0.3,"dose_mg_l":30.0},{"tp_mg_l":0.5,"dose_mg_l":60.0},{"tp_mg_l":1.0,"dose_mg_l":100.0}]',
+    forecast_horizon_minutes INTEGER NOT NULL DEFAULT 120,
+    biochemical_phosphorus_removal_efficiency REAL NOT NULL DEFAULT 0.7,
     pac_min_l_h REAL NOT NULL,
     pac_max_l_h REAL NOT NULL,
     calculation_interval_seconds INTEGER NOT NULL DEFAULT 60,
+    inflow_delay_minutes INTEGER NOT NULL DEFAULT 0,
     lag_minutes INTEGER NOT NULL,
     feedback_kp REAL NOT NULL,
     feedback_min REAL NOT NULL,
@@ -145,11 +179,13 @@ CREATE TABLE IF NOT EXISTS control_configs (
     tp_target_mg_l REAL NOT NULL,
     tp_safe_target_mg_l REAL NOT NULL,
     tp_limit_mg_l REAL NOT NULL,
+    biochemical_phosphorus_removal_efficiency REAL NOT NULL DEFAULT 0.7,
     pac_min_l_h REAL NOT NULL,
     pac_max_l_h REAL NOT NULL,
     single_step_change_ratio REAL NOT NULL,
     max_increase_l_h_per_min REAL NOT NULL,
     max_decrease_l_h_per_min REAL NOT NULL,
+    inflow_delay_minutes INTEGER NOT NULL DEFAULT 0,
     lag_minutes INTEGER NOT NULL,
     feedback_kp REAL NOT NULL,
     feedback_min REAL NOT NULL,
@@ -400,6 +436,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY,
             batch_id TEXT NOT NULL UNIQUE,
             pac_density_kg_l REAL NOT NULL,
+            al2o3_fraction REAL NOT NULL,
             effective_factor REAL NOT NULL,
             al_p_ratio REAL NOT NULL,
             updated_at TEXT NOT NULL
@@ -410,9 +447,15 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             name TEXT NOT NULL UNIQUE,
             tp_target_mg_l REAL NOT NULL,
             tp_limit_mg_l REAL NOT NULL,
+            tp_upper_mg_l REAL NOT NULL DEFAULT 0.3,
+            pac_density_kg_l REAL NOT NULL DEFAULT 1.2,
+            unit_dose_curve_json TEXT NOT NULL DEFAULT '[{"tp_mg_l":0.0,"dose_mg_l":0.0},{"tp_mg_l":0.3,"dose_mg_l":30.0},{"tp_mg_l":0.5,"dose_mg_l":60.0},{"tp_mg_l":1.0,"dose_mg_l":100.0}]',
+            forecast_horizon_minutes INTEGER NOT NULL DEFAULT 120,
+            biochemical_phosphorus_removal_efficiency REAL NOT NULL DEFAULT 0.7,
             pac_min_l_h REAL NOT NULL,
             pac_max_l_h REAL NOT NULL,
             calculation_interval_seconds INTEGER NOT NULL DEFAULT 60,
+            inflow_delay_minutes INTEGER NOT NULL DEFAULT 0,
             lag_minutes INTEGER NOT NULL,
             feedback_kp REAL NOT NULL,
             feedback_min REAL NOT NULL,
@@ -425,6 +468,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
             dosing_point_id INTEGER NOT NULL REFERENCES dosing_points(id) ON DELETE CASCADE,
+            model_kind TEXT NOT NULL DEFAULT 'tp_out_response',
             status TEXT NOT NULL DEFAULT 'draft',
             sample_interval_minutes INTEGER NOT NULL DEFAULT 5,
             recording_enabled INTEGER NOT NULL DEFAULT 0,
@@ -462,6 +506,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
         {
             "in_flow_tag_id": "INTEGER",
             "in_tp_tag_id": "INTEGER",
+            "in_ph_tag_id": "INTEGER",
             "out_flow_tag_id": "INTEGER",
             "out_tp_tag_id": "INTEGER",
             "zone_flow_tag_id": "INTEGER",
@@ -470,10 +515,64 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             "reflux_flow_2_tag_id": "INTEGER",
             "po4_tag_id": "INTEGER",
             "pac_flow_tag_id": "INTEGER",
+            **{field: "INTEGER" for field, *_ in LEARNING_SOURCE_TAG_DEFS},
             "source_configured": "INTEGER NOT NULL DEFAULT 0",
             "chemical_group_id": "INTEGER",
             "process_parameter_group_id": "INTEGER",
         },
+    )
+    ensure_columns(
+        con,
+        "chemical_groups",
+        {"al2o3_fraction": "REAL NOT NULL DEFAULT 0.018"},
+    )
+    ensure_columns(
+        con,
+        "process_parameter_groups",
+        {
+            "tp_upper_mg_l": "REAL NOT NULL DEFAULT 0.3",
+            "pac_density_kg_l": "REAL NOT NULL DEFAULT 1.2",
+            "unit_dose_curve_json": f"TEXT NOT NULL DEFAULT '{dumps_json(DEFAULT_UNIT_DOSE_CURVE)}'",
+            "forecast_horizon_minutes": "INTEGER NOT NULL DEFAULT 120",
+            "biochemical_phosphorus_removal_efficiency": "REAL NOT NULL DEFAULT 0.7",
+            "inflow_delay_minutes": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
+    ensure_columns(
+        con,
+        "control_configs",
+        {
+            "biochemical_phosphorus_removal_efficiency": "REAL NOT NULL DEFAULT 0.7",
+            "inflow_delay_minutes": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
+    con.execute("UPDATE dosing_points SET phosphorus_source='po4' WHERE phosphorus_source='po4_priority'")
+    con.execute("UPDATE dosing_points SET phosphorus_source='in_tp' WHERE phosphorus_source='tp_before'")
+    con.execute("UPDATE dosing_points SET zone_flow_tag_id=NULL WHERE zone_flow_tag_id IS NOT NULL")
+    con.execute(
+        """
+        UPDATE chemical_groups
+        SET al2o3_fraction=(
+            SELECT pc.al2o3_fraction
+            FROM pac_configs pc
+            WHERE pc.batch_id=chemical_groups.batch_id
+            ORDER BY pc.id
+            LIMIT 1
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM pac_configs pc WHERE pc.batch_id=chemical_groups.batch_id
+        )
+        """
+    )
+    con.execute(
+        """
+        UPDATE chemical_groups
+        SET al2o3_fraction=0.018
+        WHERE al2o3_fraction=1.0
+          AND NOT EXISTS (
+            SELECT 1 FROM pac_configs pc WHERE pc.batch_id=chemical_groups.batch_id
+          )
+        """
     )
     # `tag_code` is the only collection-point name. Keep the legacy display-name
     # column synchronized so historical databases cannot surface a second alias.
@@ -498,14 +597,25 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
     ensure_columns(
         con,
         "model_projects",
-        {"sample_interval_minutes": "INTEGER NOT NULL DEFAULT 5"},
+        {
+            "sample_interval_minutes": "INTEGER NOT NULL DEFAULT 5",
+            "model_kind": "TEXT NOT NULL DEFAULT 'tp_out_response'",
+        },
     )
     # Recording is runtime activity, not a model lifecycle state. Restore models
     # that were previously published before recording was started.
     con.execute(
         "UPDATE model_projects SET status='published' WHERE status='recording' AND published_at IS NOT NULL"
     )
+    con.execute(
+        "UPDATE model_projects SET recording_enabled=0, status=CASE WHEN status='recording' THEN 'draft' ELSE status END"
+    )
+    con.execute(
+        "UPDATE model_projects SET status='archived', recording_enabled=0 WHERE model_kind='dose_predict'"
+    )
     backfill_process_source_tags(con)
+    ensure_learning_source_tags(con)
+    backfill_in_ph_source_tags(con)
     backfill_parameter_groups(con)
 
 
@@ -528,10 +638,17 @@ def backfill_parameter_groups(con: sqlite3.Connection) -> None:
         else:
             cur = con.execute(
                 """
-                INSERT INTO chemical_groups(batch_id,pac_density_kg_l,effective_factor,al_p_ratio,updated_at)
-                VALUES(?,?,?,?,?)
+                INSERT INTO chemical_groups(batch_id,pac_density_kg_l,al2o3_fraction,effective_factor,al_p_ratio,updated_at)
+                VALUES(?,?,?,?,?,?)
                 """,
-                (batch_id, row["pac_density_kg_l"], row["effective_factor"], row["al_p_ratio"], row["updated_at"] or now),
+                (
+                    batch_id,
+                    row["pac_density_kg_l"],
+                    row["al2o3_fraction"],
+                    row["effective_factor"],
+                    row["al_p_ratio"],
+                    row["updated_at"] or now,
+                ),
             )
             group_id = int(cur.lastrowid)
         con.execute("UPDATE dosing_points SET chemical_group_id=? WHERE id=?", (group_id, row["dosing_point_id"]))
@@ -554,17 +671,25 @@ def backfill_parameter_groups(con: sqlite3.Connection) -> None:
             cur = con.execute(
                 """
                 INSERT INTO process_parameter_groups(
-                    name,tp_target_mg_l,tp_limit_mg_l,pac_min_l_h,pac_max_l_h,calculation_interval_seconds,
+                    name,tp_target_mg_l,tp_limit_mg_l,tp_upper_mg_l,pac_density_kg_l,unit_dose_curve_json,forecast_horizon_minutes,
+                    biochemical_phosphorus_removal_efficiency,
+                    pac_min_l_h,pac_max_l_h,calculation_interval_seconds,inflow_delay_minutes,
                     lag_minutes,feedback_kp,feedback_min,feedback_max,feedback_window_minutes,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     name,
                     row["tp_target_mg_l"],
                     row["tp_limit_mg_l"],
+                    row["tp_limit_mg_l"],
+                    1.2,
+                    dumps_json(DEFAULT_UNIT_DOSE_CURVE),
+                    120,
+                    row["biochemical_phosphorus_removal_efficiency"],
                     row["pac_min_l_h"],
                     row["pac_max_l_h"],
                     60,
+                    row["inflow_delay_minutes"],
                     row["lag_minutes"],
                     row["feedback_kp"],
                     row["feedback_min"],
@@ -588,18 +713,71 @@ def backfill_process_source_tags(con: sqlite3.Connection) -> None:
         con.execute(
             """
             UPDATE dosing_points
-            SET in_flow_tag_id=?, in_tp_tag_id=?, out_tp_tag_id=?, po4_tag_id=?, pac_flow_tag_id=?, source_configured=1
+            SET in_flow_tag_id=?, in_tp_tag_id=?, in_ph_tag_id=?, out_tp_tag_id=?, pac_flow_tag_id=?, source_configured=1
             WHERE id=?
             """,
             (
                 updates["in_flow_tag_id"],
                 updates["in_tp_tag_id"],
+                updates["in_ph_tag_id"],
                 updates["out_tp_tag_id"],
-                updates["po4_tag_id"],
                 updates["pac_flow_tag_id"],
                 point["id"],
             ),
         )
+
+
+def ensure_learning_source_tags(con: sqlite3.Connection) -> None:
+    points = con.execute("SELECT * FROM dosing_points ORDER BY id").fetchall()
+    now = utc_now_iso()
+    for point in points:
+        assigned: dict[str, int] = {}
+        for field, tag_type, _label, unit, stale, max_stale, min_value, max_value, default_value in LEARNING_SOURCE_TAG_DEFS:
+            tag = con.execute(
+                "SELECT id FROM sensor_tags WHERE dosing_point_id=? AND tag_type=? ORDER BY id LIMIT 1",
+                (point["id"], tag_type),
+            ).fetchone()
+            if not tag:
+                tag_code = f"{point['code']}_{tag_type}"
+                cur = con.execute(
+                    """
+                    INSERT INTO sensor_tags(
+                        dosing_point_id,tag_code,tag_type,name,unit,stale_minutes,max_stale_minutes,
+                        min_value,max_value,source,enabled
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,1)
+                    """,
+                    (point["id"], tag_code, tag_type, tag_code, unit, stale, max_stale, min_value, max_value, "s7comm"),
+                )
+                tag_id = int(cur.lastrowid)
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO sensor_samples(tag_id,value,unit,sample_time,receive_time,quality,source)
+                    VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (tag_id, default_value, unit, now, now, "good", "s7comm"),
+                )
+            else:
+                tag_id = int(tag["id"])
+            if point[field] is None:
+                assigned[field] = tag_id
+        if assigned:
+            set_clause = ", ".join(f"{field}=?" for field in assigned)
+            con.execute(
+                f"UPDATE dosing_points SET {set_clause}, source_configured=1 WHERE id=?",
+                (*assigned.values(), point["id"]),
+            )
+
+
+def backfill_in_ph_source_tags(con: sqlite3.Connection) -> None:
+    points = con.execute("SELECT id FROM dosing_points WHERE in_ph_tag_id IS NULL ORDER BY id").fetchall()
+    for point in points:
+        tags = con.execute(
+            "SELECT id, tag_code, tag_type FROM sensor_tags WHERE dosing_point_id=? ORDER BY id",
+            (point["id"],),
+        ).fetchall()
+        tag_id = infer_process_source_tags(tags)["in_ph_tag_id"]
+        if tag_id is not None:
+            con.execute("UPDATE dosing_points SET in_ph_tag_id=?, source_configured=1 WHERE id=?", (tag_id, point["id"]))
 
 
 def infer_process_source_tags(tags: list[sqlite3.Row]) -> dict[str, int | None]:
@@ -611,20 +789,24 @@ def infer_process_source_tags(tags: list[sqlite3.Row]) -> dict[str, int | None]:
                 return int(tag["id"])
             if field == "in_tp_tag_id" and (tag_type == "TP_BEFORE" or "IN_TP" in code or "TP_BEFORE" in code):
                 return int(tag["id"])
-            if field == "out_tp_tag_id" and (tag_type == "TP_OUT" or "OUT_TP" in code):
+            if field == "in_ph_tag_id" and (tag_type == "PH" or "IN_PH" in code or code.endswith("_PH")):
                 return int(tag["id"])
-            if field == "po4_tag_id" and (tag_type == "PO4_P" or "PO4" in code):
+            if field == "out_tp_tag_id" and (tag_type == "TP_OUT" or "OUT_TP" in code):
                 return int(tag["id"])
             if field == "pac_flow_tag_id" and (tag_type == "PAC_ACTUAL" or "QPAC" in code or "PAC_ACTUAL" in code or "PAC_FLOW" in code):
                 return int(tag["id"])
+            for learning_field, learning_type, *_ in LEARNING_SOURCE_TAG_DEFS:
+                if field == learning_field and (tag_type == learning_type or learning_type in code):
+                    return int(tag["id"])
         return None
 
     return {
         "in_flow_tag_id": find("in_flow_tag_id"),
         "in_tp_tag_id": find("in_tp_tag_id"),
+        "in_ph_tag_id": find("in_ph_tag_id"),
         "out_tp_tag_id": find("out_tp_tag_id"),
-        "po4_tag_id": find("po4_tag_id"),
         "pac_flow_tag_id": find("pac_flow_tag_id"),
+        **{field: find(field) for field, *_ in LEARNING_SOURCE_TAG_DEFS},
     }
 
 
