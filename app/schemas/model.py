@@ -37,6 +37,10 @@ class ModelSampleBulkDeleteIn(BaseModel):
     sample_ids: list[int] = Field(min_length=1)
 
 
+class ModelRecordingIn(BaseModel):
+    sample_interval_minutes: int = Field(default=5, ge=1, le=1440)
+
+
 class ModelDeployIn(BaseModel):
     enabled: bool
     actor: str = "local"

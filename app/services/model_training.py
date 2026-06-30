@@ -4,6 +4,7 @@ import base64
 import csv
 import io
 import math
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -12,8 +13,9 @@ import numpy as np
 from fastapi import HTTPException
 
 from app.api.common import row_to_dict
-from app.database import dumps_json, loads_json, utc_now_iso
+from app.database import db_session, dumps_json, loads_json, utc_now_iso
 from app.schemas import ModelSampleImportIn
+from app.services.recommendation import latest_data_for_point
 
 
 MODEL_SAMPLE_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk")
@@ -159,7 +161,7 @@ def normalize_training_config(raw: Any, kind: str, schema: list[dict[str, Any]])
     return {
         "target_column": target_definition_for_kind(kind)[1],
         "feature_columns": feature_columns,
-        "prediction_step": _config_int(raw.get("prediction_step"), base["prediction_step"], 1, 24),
+        "prediction_step": _config_int(raw.get("prediction_step"), base["prediction_step"], 0, 24),
         "valid_ratio": _config_float(raw.get("valid_ratio"), base["valid_ratio"], 0.05, 0.5),
         "split_method": split_method if split_method in SPLIT_METHODS else base["split_method"],
         "objective": objective if objective in OBJECTIVES else base["objective"],
@@ -259,7 +261,135 @@ def sync_model_feature_schema(con, model) -> list[dict[str, Any]]:
 
 
 def record_model_project_sample(con, model) -> dict[str, Any]:
-    raise HTTPException(410, "模型实时记录功能已停用，请通过 CSV 表格导入训练样本")
+    kind = model_kind(model)
+    if kind not in SUPPORTED_MODEL_KINDS:
+        raise HTTPException(422, "模型类型不支持")
+    now = datetime.now().replace(microsecond=0)
+    schema = sync_model_feature_schema(con, model)
+    live_data = latest_data_for_point(con, int(model["dosing_point_id"]), now)
+    values: dict[str, float | None] = {}
+    for item in schema:
+        point = live_data.get(item["key"])
+        values[item["key"]] = model_sample_value(point.value if point else None)
+    current_target = model_realtime_target_value(kind, live_data)
+    target_key = target_definition_for_kind(kind)[1]
+    target_value = current_target
+    if kind == MODEL_KIND_TP_OUT_RESPONSE:
+        training_config = training_config_for_model(model, kind, schema)
+        prediction_step = int(training_config["prediction_step"])
+        if prediction_step == 0:
+            values[target_key] = current_target
+        else:
+            target_value = None
+    else:
+        values[target_key] = current_target
+    suggested_l_h = values.get("PAC_ACTUAL") if kind == MODEL_KIND_TP_OUT_RESPONSE else target_value
+    sample_id = insert_training_sample(con, int(model["id"]), now.isoformat(), values, suggested_l_h, target_value, "realtime_record")
+    backfilled = 0
+    if kind == MODEL_KIND_TP_OUT_RESPONSE and current_target is not None:
+        backfilled = backfill_tp_response_target(con, model, current_target, now)
+    con.execute(
+        """
+        UPDATE model_projects
+        SET last_record_at=?,updated_at=?
+        WHERE id=?
+        """,
+        (now.isoformat(), now.isoformat(), model["id"]),
+    )
+    return {"sample_id": sample_id, "sample_time": now.isoformat(), "target_value": target_value, "backfilled": backfilled}
+
+
+def model_realtime_target_value(kind: str, live_data: dict[str, Any]) -> float | None:
+    target_source = "PAC_ACTUAL" if kind == MODEL_KIND_PAC_FLOW_PREDICT else "TP_OUT"
+    point = live_data.get(target_source)
+    return model_sample_value(point.value if point else None)
+
+
+def backfill_tp_response_target(con, model, target_value: float, now: datetime) -> int:
+    schema = sync_model_feature_schema(con, model)
+    training_config = training_config_for_model(model, MODEL_KIND_TP_OUT_RESPONSE, schema)
+    prediction_step = int(training_config["prediction_step"])
+    if prediction_step <= 0:
+        return 0
+    target_column = training_target_column(con)
+    target_key = target_definition_for_kind(MODEL_KIND_TP_OUT_RESPONSE)[1]
+    rows = con.execute(
+        f"""
+        SELECT id,values_json
+        FROM model_training_samples
+        WHERE model_project_id=? AND source='realtime_record' AND sample_time<?
+        ORDER BY sample_time DESC,id DESC
+        LIMIT ?
+        """,
+        (model["id"], now.isoformat(), prediction_step),
+    ).fetchall()
+    if len(rows) < prediction_step:
+        return 0
+    row = rows[-1]
+    values = loads_json(row["values_json"], {})
+    values[target_key] = target_value
+    cur = con.execute(
+        f"""
+        UPDATE model_training_samples
+        SET values_json=?,{target_column}=?
+        WHERE id=? AND {target_column} IS NULL
+        """,
+        (dumps_json(values), target_value, row["id"]),
+    )
+    return int(cur.rowcount or 0)
+
+
+def parse_model_record_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def due_recording_models(con) -> list[Any]:
+    rows = con.execute(
+        """
+        SELECT *
+        FROM model_projects
+        WHERE recording_enabled=1
+          AND model_kind IN ('tp_out_response','pac_flow_predict')
+        ORDER BY id
+        """
+    ).fetchall()
+    now = datetime.now()
+    due = []
+    for row in rows:
+        last_record = parse_model_record_time(row["last_record_at"])
+        interval_seconds = int(row["sample_interval_minutes"]) * 60
+        if last_record is None or (now - last_record).total_seconds() >= interval_seconds:
+            due.append(row)
+    return due
+
+
+def record_due_model_samples(con) -> dict[str, Any]:
+    recorded = 0
+    errors: list[dict[str, Any]] = []
+    for model in due_recording_models(con):
+        try:
+            record_model_project_sample(con, model)
+            recorded += 1
+        except Exception as exc:
+            errors.append({"model_id": model["id"], "message": str(exc)})
+    return {"recorded": recorded, "errors": errors}
+
+
+async def model_recording_loop() -> None:
+    while True:
+        await asyncio.sleep(5)
+        try:
+            with db_session() as con:
+                record_due_model_samples(con)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
 
 
 def _model_csv_float(value: Any, label: str, row_number: int) -> float | None:

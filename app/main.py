@@ -25,6 +25,7 @@ from app.database import (
     utc_now_iso,
 )
 from app.services.collection_runtime import collection_loop
+from app.services.model_training import model_recording_loop
 from app.services.plc import disconnect_client
 from app.services.plc_devices import plc_client_store
 from app.services.recommendation import recalculate_all
@@ -58,6 +59,7 @@ def startup() -> None:
     init_schema()
     plc_client_store().clear()
     app.state.collector_task = asyncio.create_task(collection_loop())
+    app.state.model_recording_task = asyncio.create_task(model_recording_loop())
     with db_session() as con:
         ensure_seed_data(con)
         con.execute(
@@ -73,7 +75,7 @@ def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    for task_name in ("collector_task",):
+    for task_name in ("collector_task", "model_recording_task"):
         task = getattr(app.state, task_name, None)
         if task:
             task.cancel()

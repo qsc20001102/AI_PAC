@@ -15,6 +15,7 @@ from app.schemas import (
     ModelProjectCreate,
     ModelProjectUpdate,
     ModelPublishIn,
+    ModelRecordingIn,
     ModelSampleBulkDeleteIn,
     ModelSampleImportIn,
 )
@@ -25,6 +26,7 @@ from app.services.model_training import (
     decode_model_sample_csv_payload,
     import_model_csv_samples,
     normalize_training_config,
+    record_model_project_sample,
     sync_model_feature_schema,
     target_definition_for_kind,
     train_model_project_artifact,
@@ -125,18 +127,41 @@ def delete_model_project(model_id: int) -> dict[str, Any]:
 
 
 @router.post("/api/models/{model_id}/recording/start")
-def start_model_recording(model_id: int) -> dict[str, Any]:
-    raise HTTPException(410, "模型实时记录功能已停用，请通过 CSV 表格导入训练样本")
+def start_model_recording(model_id: int, payload: ModelRecordingIn) -> dict[str, Any]:
+    with db_session() as con:
+        model = model_project_or_404(con, model_id)
+        now = utc_now_iso()
+        con.execute(
+            """
+            UPDATE model_projects
+            SET recording_enabled=1,sample_interval_minutes=?,last_record_at=NULL,updated_at=?
+            WHERE id=?
+            """,
+            (payload.sample_interval_minutes, now, model_id),
+        )
+        audit(con, "local", "recording_start", "model_project", str(model_id), payload.model_dump())
+        return {"ok": True, "model": model_project_detail(con, model["id"])["model"]}
 
 
 @router.post("/api/models/{model_id}/recording/stop")
 def stop_model_recording(model_id: int) -> dict[str, Any]:
-    raise HTTPException(410, "模型实时记录功能已停用，请通过 CSV 表格导入训练样本")
+    with db_session() as con:
+        model_project_or_404(con, model_id)
+        con.execute(
+            "UPDATE model_projects SET recording_enabled=0,updated_at=? WHERE id=?",
+            (utc_now_iso(), model_id),
+        )
+        audit(con, "local", "recording_stop", "model_project", str(model_id), {})
+        return {"ok": True, "model": model_project_detail(con, model_id)["model"]}
 
 
 @router.post("/api/models/{model_id}/samples/record")
 def record_model_sample(model_id: int) -> dict[str, Any]:
-    raise HTTPException(410, "模型实时记录功能已停用，请通过 CSV 表格导入训练样本")
+    with db_session() as con:
+        model = model_project_or_404(con, model_id)
+        result = record_model_project_sample(con, model)
+        audit(con, "local", "record", "model_training_sample", str(model_id), result)
+        return {"ok": True, **result, "model": model_project_detail(con, model_id)["model"]}
 
 
 @router.delete("/api/models/{model_id}/samples/{sample_id}")

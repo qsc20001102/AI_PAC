@@ -325,6 +325,23 @@ def predict_tp_forecast_model(model: sqlite3.Row, data: dict[str, DataPoint], ex
     return prediction, {"model_id": model["id"], "version": model["name"], "features": feature_values, "format": artifact.get("format"), "target_label": artifact.get("target_label")}, None
 
 
+def predict_pac_flow_model(model: sqlite3.Row, data: dict[str, DataPoint], extra: dict[str, float] | None = None) -> tuple[float | None, dict[str, Any] | None, str | None]:
+    artifact = loads_json(model["artifact_json"], {})
+    if artifact.get("format") != "ai_pac_flow_predict_v1":
+        return None, None, "模型文件格式已过期，请重新训练"
+    if not artifact.get("booster_model") or not artifact.get("feature_names"):
+        return None, None, "模型文件无效"
+    try:
+        row, feature_values = model_feature_row(artifact, data, extra)
+        booster = lgb.Booster(model_str=artifact["booster_model"])
+        prediction = float(booster.predict(np.array([row], dtype=float))[0])
+        if not math.isfinite(prediction):
+            return None, None, "模型输出异常"
+    except Exception:
+        return None, None, "模型推理异常"
+    return prediction, {"model_id": model["id"], "version": model["name"], "features": feature_values, "feature_overrides": extra or {}, "format": artifact.get("format"), "target_label": artifact.get("target_label")}, None
+
+
 def point_control(con: sqlite3.Connection, point: sqlite3.Row) -> sqlite3.Row:
     control = None
     if point["process_parameter_group_id"] is not None:
@@ -404,18 +421,19 @@ def calculate_for_point(
     raw = base
     mode = "conservative"
     ai_detail: dict[str, Any] | None = None
-    if ai_enabled and tp_forecast and tp_forecast.get("model_id") and not tp_forecast.get("error"):
-        model = active_model(con, dosing_point_id, "tp_out_response")
-        optimized, detail, error = optimize_pac_by_tp_forecast_model(model, data, control) if model else (None, None, "无投用出水TP预测模型")
-        if optimized is not None:
-            raw = optimized
+    pac_model = active_model(con, dosing_point_id, "pac_flow_predict") if ai_enabled else None
+    if pac_model:
+        target_tp_value = float(control["tp_target_mg_l"])
+        predicted_pac, detail, error = predict_pac_flow_model(pac_model, data, {"TP_OUT": target_tp_value})
+        if predicted_pac is not None:
+            raw = predicted_pac
             mode = "normal"
             ai_detail = detail
-            reasons.append(f"正常模式：枚举PAC加药流量，按下一次出水TP检测数据寻找刚低于目标TP {float(control['tp_target_mg_l']):.4g} mg/L 的最小加药量")
+            reasons.append(f"正常模式：投用加药流量预测模型 {pac_model['name']}，将模型输入中的出水TP由当前值 {current_tp_value:.4g} mg/L 替换为目标TP {target_tp_value:.4g} mg/L，预测目标TP对应加药流量 {predicted_pac:.4g} L/h")
         else:
-            reasons.append(error or "无投用出水TP预测模型，使用保守公式")
+            reasons.append(error or "加药流量预测模型不可用，回退保守模式")
     else:
-        reasons.append("无投用出水TP预测模型，使用保守模式纯计算")
+        reasons.append("无投用加药流量预测模型，使用保守模式纯计算")
     if mode == "conservative" and current_tp_value > float(control["tp_upper_mg_l"]):
         final = float(control["pac_max_l_h"])
         reasons.append("实时出水TP高于上限，直接输出最大加药流量")

@@ -69,10 +69,12 @@ function modelStatusClass(status) {
 }
 
 function modelDisplayStatusLabel(model) {
+  if (model?.recording_enabled) return "记录中";
   return modelStatusLabel(model.status);
 }
 
 function modelDisplayStatusClass(model) {
+  if (model?.recording_enabled) return "delayed";
   return modelStatusClass(model.status);
 }
 
@@ -106,9 +108,9 @@ function renderModelWorkspace(detail) {
   const metrics = model.metrics || {};
   const artifact = model.artifact || {};
   const sampleTargetLabel = modelTargetLabel(model);
-  const deployText = model.model_kind === "pac_flow_predict"
-    ? "加药流量预测模型用于离线训练和对比分析，不会替代当前闭环推荐逻辑。"
-    : "投用后进入正常模式：系统枚举PAC加药流量，用模型预测下一次出水TP检测数据，并选择刚低于目标TP的最小加药量。";
+  const deployHintText = model.model_kind === "pac_flow_predict"
+    ? "投用后进入正常模式：模型直接预测实际加药流量，并按工艺参数上下限限幅。"
+    : "投用后仅显示预测TP值：用于查看下一次出水TP检测数据，不直接替代加药流量推荐。";
   return `
     <div class="panel-header">
       <div><div class="panel-title">${htmlEscape(model.name)}</div><div class="muted">训练投加点：${htmlEscape(model.dosing_point_name)}　类型：${modelKindLabel(model)}　状态：<span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span></div></div>
@@ -123,6 +125,12 @@ function renderModelWorkspace(detail) {
           <button class="btn ghost" id="refreshModelSamplesBtn" type="button">刷新样本</button>
           <button class="btn ghost" id="exportModelSamplesBtn" type="button">导出 CSV</button>
           <label class="btn primary file-button" for="modelCsvInput">导入 CSV</label><input id="modelCsvInput" type="file" accept=".csv,text/csv" hidden>
+        </div>
+        <div class="model-recording-row">
+          <label>记录周期(min)<input id="modelRecordInterval" type="number" min="1" max="1440" step="1" value="${htmlEscape(model.sample_interval_minutes || 5)}"></label>
+          <button class="btn ghost" id="recordModelSampleBtn" type="button">记录当前样本</button>
+          <button class="btn ${model.recording_enabled ? "" : "primary"}" id="toggleModelRecordingBtn" type="button">${model.recording_enabled ? "关闭实时记录" : "开启实时记录"}</button>
+          <span class="muted">${model.recording_enabled ? `实时记录中，上次记录：${dateMinute(model.last_record_at)}` : "实时记录未开启"}</span>
         </div>
         <div class="muted model-sampling-note">${htmlEscape(modelKindLabel(model))}使用${htmlEscape(sampleTargetLabel)}作为标签，标签不会进入输入特征。</div>
         <div class="model-sample-query">
@@ -145,7 +153,7 @@ function renderModelWorkspace(detail) {
       <section class="model-step">
         <div class="model-step-title"><span>4</span><div>投用</div><small>${model.published_at ? `投用时间：${dateMinute(model.published_at)}` : "未投用"}</small></div>
         <div class="model-step-actions"><button class="btn ${model.status === "published" ? "" : "primary"}" id="deployModelBtn" type="button" ${model.trained_at ? "" : "disabled"}>${model.status === "published" ? "停止投用" : "投用模型"}</button></div>
-        <div class="muted">${deployText}</div>
+        <div class="muted">${deployHintText}</div>
       </section>
     </div>
   `;
@@ -175,7 +183,7 @@ function renderModelTrainingConfig(model, columns) {
           </div>
         </div>
         <div class="model-param-grid">
-          ${modelNumberField("prediction_step", config.prediction_step, 1, 24, "1", model)}
+          ${modelNumberField("prediction_step", config.prediction_step, 0, 24, "1", model)}
           ${modelNumberField("valid_ratio", config.valid_ratio, 0.05, 0.5, "0.01", model)}
           ${modelSelectField("split_method", [
             { value: "time", label: "time" },
@@ -252,7 +260,7 @@ function modelParamHelp(name, model) {
   const helps = {
     target_column: `作用：预测目标列\\A建议默认值：${targetDefault}\\A调整建议：不同模型类型必须对应不同目标列，页面会按模型类型自动固定。`,
     feature_columns: `作用：输入字段\\A建议默认值：${featureDefault}\\A调整建议：不同数据表字段变化时调整；至少保留 1 个有变化的数值字段。`,
-    prediction_step: "作用：预测步长\\A建议默认值：1\\A调整建议：2小时数据预测下一次检测就填 1。",
+    prediction_step: "作用：预测步长\\A建议默认值：1\\A调整建议：填 0 表示直接预测当前条数据；2小时数据预测下一次检测就填 1。",
     valid_ratio: "作用：验证集比例\\A建议默认值：0.2\\A调整建议：数据少用 0.2，数据多可调到 0.15。",
     split_method: "作用：划分方式\\A建议默认值：time\\A调整建议：工业时序数据必须按时间切分；只在明确要随机抽样验证时用 random。",
     objective: "作用：损失函数\\A建议默认值：huber\\A调整建议：异常点多用 huber，数据平稳可用 regression_l2。",
@@ -410,6 +418,8 @@ function wireModelWorkspace(detail) {
   document.getElementById("refreshModelSamplesBtn")?.addEventListener("click", async () => { await renderPage(); });
   document.getElementById("exportModelSamplesBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/samples.csv`; });
   document.getElementById("modelCsvInput")?.addEventListener("change", (event) => importModelSamples(model.id, event));
+  document.getElementById("recordModelSampleBtn")?.addEventListener("click", () => recordModelSample(model.id));
+  document.getElementById("toggleModelRecordingBtn")?.addEventListener("click", () => toggleModelRecording(model));
   document.getElementById("trainModelBtn")?.addEventListener("click", () => trainModelProject(model.id));
   document.getElementById("downloadModelArtifactBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/artifact`; });
   document.getElementById("deployModelBtn")?.addEventListener("click", () => deployModelProject(model));
@@ -530,6 +540,31 @@ async function clearAllModelSamples(modelId, count) {
     showToast(`已清空 ${res.deleted} 条训练样本`);
     await renderPage();
   } catch (err) { showToast(`清空失败：${err.message}`); }
+}
+
+function modelRecordInterval() {
+  return Math.min(1440, Math.max(1, Number(document.getElementById("modelRecordInterval")?.value || 5)));
+}
+
+async function recordModelSample(modelId) {
+  try {
+    const res = await api(`/api/models/${modelId}/samples/record`, { method: "POST" });
+    showToast(`已记录 1 条训练样本${res.backfilled ? `，回填 ${res.backfilled} 条标签` : ""}`);
+    await renderPage();
+  } catch (err) { showToast(`记录失败：${err.message}`); }
+}
+
+async function toggleModelRecording(model) {
+  const enabled = Boolean(model.recording_enabled);
+  try {
+    const url = `/api/models/${model.id}/recording/${enabled ? "stop" : "start"}`;
+    const options = enabled
+      ? { method: "POST" }
+      : { method: "POST", body: JSON.stringify({ sample_interval_minutes: modelRecordInterval() }) };
+    await api(url, options);
+    showToast(enabled ? "实时记录已关闭" : "实时记录已开启");
+    await renderPage();
+  } catch (err) { showToast(`${enabled ? "关闭" : "开启"}失败：${err.message}`); }
 }
 
 async function trainModelProject(modelId) {

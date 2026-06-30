@@ -2,9 +2,11 @@ async function renderProcess(main) {
   const processParameterGroups = await api("/api/process-parameter-groups");
   const rows = state.points.map((p) => `
     <div class="list-card ${!state.editingNewPoint && p.id === state.selectedPointId ? "active" : ""}" data-point-select="${p.id}">
-      <div style="font-weight:800">${htmlEscape(p.name)}</div>
-      <div class="muted" style="margin-top:5px">${htmlEscape(p.code)}</div>
-      <div style="margin-top:8px"><span class="status-tag status-${p.enabled ? "fresh" : "stale"}">${p.enabled ? "启用" : "停用"}</span></div>
+      <div class="process-point-card-main">
+        <div class="process-point-card-name">${htmlEscape(p.name)}</div>
+        <div class="process-point-card-code">${htmlEscape(p.code)}</div>
+      </div>
+      <span class="status-tag status-${p.enabled ? "fresh" : "stale"}">${p.enabled ? "启用" : "停用"}</span>
     </div>
   `).join("");
   const p = state.editingNewPoint ? defaultNewPoint() : selectedPoint();

@@ -20,6 +20,7 @@ from app.schemas.model import (
     ModelProjectCreate,
     ModelProjectUpdate,
     ModelPublishIn,
+    ModelRecordingIn,
     ModelSampleBulkDeleteIn,
     ModelSampleImportIn,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "ModelProjectCreate",
     "ModelProjectUpdate",
     "ModelPublishIn",
+    "ModelRecordingIn",
     "ModelSampleBulkDeleteIn",
     "ModelSampleImportIn",
     "PlcDeviceCreate",

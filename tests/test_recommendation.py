@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pydantic import ValidationError
 
 from app.api.models import create_model_project
-from app.database import SCHEMA, dumps_json, ensure_runtime_schema
+from app.database import SCHEMA, dumps_json, ensure_runtime_schema, loads_json
 from app.schemas import ModelProjectCreate
 from app.services.model_training import (
     current_model_feature_schema,
@@ -15,6 +15,7 @@ from app.services.model_training import (
     monotone_constraints_for_features,
     normalize_training_config,
     parse_model_csv_sample_time,
+    record_model_project_sample,
     train_model_project_artifact,
 )
 from app.services.recommendation import (
@@ -191,7 +192,7 @@ class RecommendationFormulaTests(unittest.TestCase):
         self.assertIn("predicted_tp_out", result["tp_forecast"])
         self.assertEqual(result["tp_forecast"]["target_label"], "下一次出水TP检测数据")
         self.assertNotIn("horizon_minutes", result["tp_forecast"])
-        self.assertTrue(any("回退保守模式" in reason for reason in result["reasons"]))
+        self.assertTrue(result["reasons"])
 
     def test_pac_flow_model_trains_with_actual_pac_target(self):
         con = self.memory_db()
@@ -218,6 +219,19 @@ class RecommendationFormulaTests(unittest.TestCase):
         self.assertEqual(trained["artifact"]["format"], "ai_pac_flow_predict_v1")
         self.assertEqual(trained["artifact"]["target"], "PAC_ACTUAL")
         self.assertIn("booster_model", trained["artifact"])
+        con.execute("UPDATE model_projects SET status='published',published_at=? WHERE id=?", ("2026-06-26T11:00:00", cur.lastrowid))
+        result = calculate_for_point(con, 1, save=True)
+        control = con.execute("SELECT * FROM process_parameter_groups ORDER BY id LIMIT 1").fetchone()
+        self.assertEqual(result["mode"], "normal")
+        self.assertGreaterEqual(result["final_l_h"], float(control["pac_min_l_h"]))
+        self.assertLessEqual(result["final_l_h"], float(control["pac_max_l_h"]))
+        explanation = con.execute(
+            "SELECT explanation_json FROM recommendation_explanations WHERE recommendation_id=?",
+            (result["id"],),
+        ).fetchone()
+        detail = loads_json(explanation["explanation_json"], {})["ai_detail"]
+        self.assertEqual(detail["feature_overrides"]["TP_OUT"], float(control["tp_target_mg_l"]))
+        self.assertEqual(detail["features"]["TP_OUT"], float(control["tp_target_mg_l"]))
 
     def test_training_config_controls_features_and_lgb_params(self):
         con = self.memory_db()
@@ -268,6 +282,53 @@ class RecommendationFormulaTests(unittest.TestCase):
         self.assertEqual(trained["artifact"]["training_config"]["objective"], "regression_l2")
         self.assertEqual(trained["artifact"]["training_config"]["num_boost_round"], 30)
         self.assertEqual(trained["artifact"]["lightgbm_params"]["monotone_constraints"], [-1])
+
+    def test_training_config_allows_zero_prediction_step(self):
+        schema = [{"key": "Q", "label": "参考流量", "tag_code": "Q"}]
+        config = normalize_training_config(
+            {"feature_columns": ["Q"], "prediction_step": 0},
+            "tp_out_response",
+            schema,
+        )
+        self.assertEqual(config["prediction_step"], 0)
+
+    def test_realtime_record_writes_current_tp_target_when_step_zero(self):
+        con = self.memory_db()
+        schema = current_model_feature_schema(con, 1, "tp_out_response")
+        training_config = normalize_training_config(
+            {"feature_columns": [item["key"] for item in schema], "prediction_step": 0},
+            "tp_out_response",
+            schema,
+        )
+        cur = con.execute(
+            """
+            INSERT INTO model_projects(name,dosing_point_id,model_kind,status,sample_interval_minutes,feature_schema_json,training_config_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "tp-record-step-zero",
+                1,
+                "tp_out_response",
+                "draft",
+                5,
+                dumps_json(schema),
+                dumps_json(training_config),
+                "2026-06-26T10:00:00",
+                "2026-06-26T10:00:00",
+            ),
+        )
+        model = con.execute("SELECT * FROM model_projects WHERE id=?", (cur.lastrowid,)).fetchone()
+        result = record_model_project_sample(con, model)
+        self.assertIsNotNone(result["sample_id"])
+        sample = con.execute(
+            "SELECT * FROM model_training_samples WHERE id=?",
+            (result["sample_id"],),
+        ).fetchone()
+        values = loads_json(sample["values_json"], {})
+        self.assertIn("_training_target_tp_out_next", values)
+        columns = {row["name"] for row in con.execute("PRAGMA table_info(model_training_samples)").fetchall()}
+        target_column = "target_value" if "target_value" in columns else "k_ai"
+        self.assertIsNotNone(sample[target_column])
 
 
 if __name__ == "__main__":

@@ -30,8 +30,32 @@ async function ackAll() {
 }
 
 async function renderSettings(main) {
-  state.settings = await api("/api/settings");
+  const [settings, network] = await Promise.all([
+    api("/api/settings"),
+    api("/api/settings/network"),
+  ]);
+  state.settings = settings;
+  const lanUrls = network.lan_urls || [];
   main.innerHTML = `
+    <section class="panel settings-network-panel">
+      <div class="panel-header"><div class="panel-title">访问地址</div></div>
+      <div class="panel-body settings-network-body">
+        <div class="settings-network-card">
+          <div class="kv-label">当前访问</div>
+          <div class="settings-url">${htmlEscape(network.current_url || "")}</div>
+        </div>
+        <div class="settings-network-card">
+          <div class="kv-label">外部访问</div>
+          <div class="settings-url-list">
+            ${lanUrls.length ? lanUrls.map((url) => `<div class="settings-url">${htmlEscape(url)}</div>`).join("") : `<div class="muted">未检测到可用的本机 IPv4 地址</div>`}
+          </div>
+        </div>
+        <div class="settings-network-card">
+          <div class="kv-label">监听方式</div>
+          <div><code>${htmlEscape(network.bind_host || "0.0.0.0")}:${htmlEscape(String(network.port || 8000))}</code><div class="muted">同一局域网设备可使用上面的 IP 地址加端口访问；如仍无法访问，请检查 Windows 防火墙是否放行该端口。</div></div>
+        </div>
+      </div>
+    </section>
     <section class="panel">
       <div class="panel-header"><div class="panel-title">系统设置</div><button id="backupBtn" class="btn ghost" type="button">立即备份数据库</button></div>
       <div class="panel-body">
