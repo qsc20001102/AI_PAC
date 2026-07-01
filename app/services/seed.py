@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 from app.database import DEFAULT_UNIT_DOSE_CURVE, backfill_process_source_tags, create_time_range, dumps_json, ensure_learning_source_tags, table_count, utc_now_iso
-from app.services.settings_config import DEFAULT_LISTEN_PORT, ensure_default_app_settings
+from app.services.settings_config import DEFAULT_LISTEN_PORT, PLC_AUTO_CONNECT_KEY, ensure_default_app_settings
 
 
 def ensure_seed_data(con: sqlite3.Connection) -> None:
@@ -444,6 +444,7 @@ def _insert_initial_alarms(con: sqlite3.Connection, now: datetime) -> None:
 def _insert_settings(con: sqlite3.Connection, now_iso: str) -> None:
     settings = [
         ("listen_port", str(DEFAULT_LISTEN_PORT), now_iso),
+        (PLC_AUTO_CONNECT_KEY, "true", now_iso),
     ]
     con.executemany(
         "INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?)",

@@ -22,7 +22,7 @@ from app.services.model_training import (
 from app.services import collection_runtime, plc_devices
 from app.api.settings import validate_setting_value
 from app.services.plc import PlcConnectResult, PlcReadResult
-from app.services.settings_config import ensure_default_app_settings, normalize_listen_port
+from app.services.settings_config import ensure_default_app_settings, get_plc_auto_connect_enabled, normalize_listen_port
 from app.services.recommendation import (
     calculate_for_point,
     conservative_formula_l_h,
@@ -122,6 +122,9 @@ class RecommendationFormulaTests(unittest.TestCase):
             validate_setting_value("listen_port", "70000")
         with self.assertRaises(HTTPException):
             validate_setting_value("listen_port", "abc")
+        self.assertEqual(validate_setting_value("plc_auto_connect", "FALSE"), "false")
+        with self.assertRaises(HTTPException):
+            validate_setting_value("plc_auto_connect", "yes")
         with self.assertRaises(HTTPException):
             validate_setting_value("demo_live_refresh", "false")
         with self.assertRaises(HTTPException):
@@ -140,6 +143,8 @@ class RecommendationFormulaTests(unittest.TestCase):
         ensure_default_app_settings(con)
         self.assertIsNone(con.execute("SELECT key FROM app_settings WHERE key='backup_dir'").fetchone())
         self.assertIsNotNone(con.execute("SELECT key FROM app_settings WHERE key='listen_port'").fetchone())
+        self.assertTrue(get_plc_auto_connect_enabled(con))
+        self.assertIsNotNone(con.execute("SELECT key FROM app_settings WHERE key='plc_auto_connect'").fetchone())
         self.assertIsNone(con.execute("SELECT key FROM app_settings WHERE key='demo_live_refresh'").fetchone())
 
     def test_model_inputs_have_no_monotone_constraints(self):
@@ -423,6 +428,44 @@ class RecommendationFormulaTests(unittest.TestCase):
         self.assertEqual(updated["last_quality"], "good")
         self.assertEqual(updated["last_value_text"], "12.5")
         self.assertIsNone(updated["last_error"])
+
+    def test_auto_connect_enabled_plc_devices_only_connects_enabled_rows(self):
+        con = self.memory_db()
+        plc_devices.plc_client_store().clear()
+        con.execute("UPDATE plc_devices SET enabled=0,status='disconnected',last_error=NULL")
+        con.execute("UPDATE plc_devices SET enabled=1 WHERE id=1")
+        calls = []
+
+        class FakeClient:
+            def get_connected(self):
+                return True
+
+        original_connect = plc_devices.connect_s7_1500
+        try:
+            def fake_connect(**kwargs):
+                calls.append(kwargs)
+                return PlcConnectResult(
+                    ok=True,
+                    status="connected",
+                    message="ok",
+                    pdu_length=480,
+                    client=FakeClient(),
+                )
+
+            plc_devices.connect_s7_1500 = fake_connect
+            summary = plc_devices.auto_connect_enabled_plc_devices(con)
+        finally:
+            plc_devices.connect_s7_1500 = original_connect
+            plc_devices.plc_client_store().clear()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(summary["attempted"], 1)
+        self.assertEqual(summary["connected"], 1)
+        self.assertEqual(summary["failed"], 0)
+        device = con.execute("SELECT status,pdu_length,last_error FROM plc_devices WHERE id=1").fetchone()
+        self.assertEqual(device["status"], "connected")
+        self.assertEqual(device["pdu_length"], 480)
+        self.assertIsNone(device["last_error"])
 
 
 if __name__ == "__main__":

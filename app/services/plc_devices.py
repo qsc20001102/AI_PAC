@@ -91,6 +91,54 @@ def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
     return None
 
 
+def auto_connect_enabled_plc_devices(con) -> dict[str, int]:
+    clients = plc_client_store()
+    rows = con.execute("SELECT * FROM plc_devices WHERE enabled=1 ORDER BY id").fetchall()
+    summary = {"attempted": 0, "connected": 0, "failed": 0, "skipped": 0}
+    for device in rows:
+        device_id = int(device["id"])
+        if device["protocol"] != "s7_1500":
+            summary["skipped"] += 1
+            continue
+        old_client = clients.pop(device_id, None)
+        if old_client is not None:
+            disconnect_client(old_client)
+        summary["attempted"] += 1
+        result = connect_s7_1500(
+            ip_address=device["ip_address"],
+            port=int(device["port"]),
+            rack=int(device["rack"]),
+            slot=int(device["slot"]),
+            timeout_ms=int(device["timeout_ms"]),
+        )
+        now = utc_now_iso()
+        if result.ok and result.client is not None:
+            clients[device_id] = result.client
+            con.execute(
+                """
+                UPDATE plc_devices
+                SET status='connected', pdu_length=?, last_connected_at=?, last_error=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (result.pdu_length, now, now, device_id),
+            )
+            log_plc_device_event(con, device_id, "auto_connect", "connected", "项目启动自动连接 PLC 成功", result.pdu_length)
+            summary["connected"] += 1
+            continue
+
+        con.execute(
+            """
+            UPDATE plc_devices
+            SET status='error', pdu_length=NULL, last_error=?, updated_at=?
+            WHERE id=?
+            """,
+            (result.message, now, device_id),
+        )
+        log_plc_device_event(con, device_id, "auto_connect", "error", result.message)
+        summary["failed"] += 1
+    return summary
+
+
 def plc_client_connected(client: Any) -> bool:
     if not hasattr(client, "get_connected"):
         return True

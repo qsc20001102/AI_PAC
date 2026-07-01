@@ -7,12 +7,18 @@ from app.database import utc_now_iso
 
 DEFAULT_LISTEN_PORT = 8000
 LISTEN_PORT_KEY = "listen_port"
+PLC_AUTO_CONNECT_KEY = "plc_auto_connect"
 
 SETTING_DEFINITIONS: dict[str, dict[str, str]] = {
     LISTEN_PORT_KEY: {
         "label": "Web端口",
         "description": "项目 Web 服务监听端口，修改后需要重启服务生效。",
         "value_type": "number",
+    },
+    PLC_AUTO_CONNECT_KEY: {
+        "label": "PLC自动连接",
+        "description": "开启后项目启动完成会自动连接已启用的 PLC 设备；关闭后启动时不自动连接。",
+        "value_type": "boolean",
     }
 }
 
@@ -46,6 +52,17 @@ def get_configured_listen_port(con: sqlite3.Connection) -> int:
     return normalize_listen_port(get_setting_value(con, LISTEN_PORT_KEY))
 
 
+def get_bool_setting(con: sqlite3.Connection, key: str, default: bool = False) -> bool:
+    value = get_setting_value(con, key)
+    if value is None:
+        return default
+    return str(value).strip().lower() == "true"
+
+
+def get_plc_auto_connect_enabled(con: sqlite3.Connection) -> bool:
+    return get_bool_setting(con, PLC_AUTO_CONNECT_KEY, default=True)
+
+
 def enrich_setting_row(row: sqlite3.Row) -> dict[str, str]:
     data = dict(row)
     definition = SETTING_DEFINITIONS.get(str(row["key"]), {})
@@ -59,6 +76,7 @@ def ensure_default_app_settings(con: sqlite3.Connection) -> None:
     now = utc_now_iso()
     defaults = {
         LISTEN_PORT_KEY: str(DEFAULT_LISTEN_PORT),
+        PLC_AUTO_CONNECT_KEY: "true",
     }
     if OBSOLETE_SETTING_KEYS:
         placeholders = ",".join("?" for _ in OBSOLETE_SETTING_KEYS)

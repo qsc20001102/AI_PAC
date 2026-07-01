@@ -27,9 +27,10 @@ from app.database import (
 from app.services.collection_runtime import collection_loop
 from app.services.model_training import model_recording_loop
 from app.services.plc import disconnect_client
-from app.services.plc_devices import plc_client_store
+from app.services.plc_devices import auto_connect_enabled_plc_devices, plc_client_store
 from app.services.recommendation import recalculate_all
 from app.services.seed import ensure_seed_data
+from app.services.settings_config import get_plc_auto_connect_enabled
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -58,8 +59,6 @@ app.include_router(trends_router)
 def startup() -> None:
     init_schema()
     plc_client_store().clear()
-    app.state.collector_task = asyncio.create_task(collection_loop())
-    app.state.model_recording_task = asyncio.create_task(model_recording_loop())
     with db_session() as con:
         ensure_seed_data(con)
         con.execute(
@@ -70,7 +69,11 @@ def startup() -> None:
             """,
             (utc_now_iso(),),
         )
+        if get_plc_auto_connect_enabled(con):
+            auto_connect_enabled_plc_devices(con)
         recalculate_all(con)
+    app.state.collector_task = asyncio.create_task(collection_loop())
+    app.state.model_recording_task = asyncio.create_task(model_recording_loop())
 
 
 @app.on_event("shutdown")

@@ -15,6 +15,7 @@ from app.schemas import SettingUpdate
 from app.services.audit import audit
 from app.services.settings_config import (
     LISTEN_PORT_KEY,
+    PLC_AUTO_CONNECT_KEY,
     SETTING_DEFINITIONS,
     enrich_setting_row,
     get_configured_listen_port,
@@ -92,9 +93,9 @@ def settings() -> list[dict[str, Any]]:
             SELECT *
             FROM app_settings
             WHERE key IN ({placeholders})
-            ORDER BY CASE key WHEN ? THEN 1 ELSE 99 END
+            ORDER BY CASE key WHEN ? THEN 1 WHEN ? THEN 2 ELSE 99 END
             """,
-            (*SETTING_DEFINITIONS.keys(), LISTEN_PORT_KEY),
+            (*SETTING_DEFINITIONS.keys(), LISTEN_PORT_KEY, PLC_AUTO_CONNECT_KEY),
         ).fetchall()
     return [enrich_setting_row(row) for row in rows]
 
@@ -154,4 +155,9 @@ def validate_setting_value(key: str, value: str) -> str:
         if normalize_listen_port(port, default=-1) != port:
             raise HTTPException(422, "Web端口必须是 1-65535 的整数")
         return str(port)
+    if SETTING_DEFINITIONS[key].get("value_type") == "boolean":
+        text = str(value).strip().lower()
+        if text not in {"true", "false"}:
+            raise HTTPException(422, "该系统参数只能设置为开启或关闭")
+        return text
     return str(value)
