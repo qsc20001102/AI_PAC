@@ -54,7 +54,6 @@
 
 - `target_column`
 - `feature_columns`
-- `prediction_step`，允许为 `0`，表示直接预测当前条数据
 - `valid_ratio`
 - `split_method`
 - `objective`
@@ -69,7 +68,6 @@
 - `bagging_fraction`
 - `bagging_freq`
 - `monotone_constraints`
-- `sample_weight_rule`
 
 参数项支持鼠标悬停查看建议默认值和调整建议。训练样本可手动记录，也可开启实时记录并设置记录周期。
 
