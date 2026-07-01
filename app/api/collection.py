@@ -286,18 +286,69 @@ def sample_history(tag_code: str, limit: int = Query(200, ge=1, le=5000)) -> dic
     return {"tag": row_to_dict(tag), "samples": [row_to_dict(row) for row in rows]}
 
 
+def _build_time_grid(start: datetime, end: datetime, interval_minutes: int) -> list[datetime]:
+    grid: list[datetime] = []
+    cur = start
+    while cur <= end:
+        grid.append(cur)
+        cur += timedelta(minutes=interval_minutes)
+    return grid
+
+
+def _forward_fill_grid(
+    con: sqlite3.Connection,
+    tag_id: int,
+    grid: list[datetime],
+    interval_minutes: int,
+) -> list[dict[str, Any]]:
+    if not grid:
+        return []
+    end_iso = grid[-1].isoformat()
+    lookback = timedelta(minutes=interval_minutes)
+    rows = con.execute(
+        """
+        SELECT value, sample_time
+        FROM sensor_samples
+        WHERE tag_id=? AND sample_time<=?
+        ORDER BY sample_time ASC
+        """,
+        (tag_id, end_iso),
+    ).fetchall()
+    row_idx = 0
+    points: list[dict[str, Any]] = []
+    for t in grid:
+        t_iso = t.isoformat()
+        window_start = (t - lookback).isoformat()
+        best_value = None
+        while row_idx < len(rows) and rows[row_idx]["sample_time"] <= t_iso:
+            if rows[row_idx]["sample_time"] >= window_start:
+                best_value = rows[row_idx]["value"]
+            row_idx += 1
+        points.append({"sample_time": t_iso, "value": best_value})
+    return points
+
+
 @router.get("/api/history-data")
 def history_data(
     tag_ids: str = Query(""),
     start_time: str | None = None,
     end_time: str | None = None,
     limit_per_tag: int = Query(5000, ge=1, le=20000),
+    interval_minutes: int | None = Query(None, ge=1, le=1440),
 ) -> dict[str, Any]:
     ids = sorted({int(item) for item in tag_ids.split(",") if item.strip().isdigit()})
     if not ids:
         return {"series": []}
     start = start_time or (datetime.now() - timedelta(days=1)).isoformat()
     end = end_time or datetime.now().isoformat()
+    grid: list[datetime] | None = None
+    if interval_minutes is not None:
+        try:
+            start_dt = datetime.fromisoformat(start)
+            end_dt = datetime.fromisoformat(end)
+            grid = _build_time_grid(start_dt, end_dt, interval_minutes)
+        except (ValueError, TypeError):
+            grid = None
     with db_session() as con:
         series = []
         for tag_id in ids:
@@ -312,23 +363,27 @@ def history_data(
             ).fetchone()
             if not tag:
                 continue
-            rows = con.execute(
-                """
-                SELECT value, unit, sample_time, receive_time, quality, source
-                FROM sensor_samples
-                WHERE tag_id=? AND sample_time>=? AND sample_time<=?
-                ORDER BY sample_time ASC
-                LIMIT ?
-                """,
-                (tag_id, start, end, limit_per_tag),
-            ).fetchall()
+            if grid is not None:
+                points = _forward_fill_grid(con, tag_id, grid, interval_minutes)
+            else:
+                rows = con.execute(
+                    """
+                    SELECT value, unit, sample_time, receive_time, quality, source
+                    FROM sensor_samples
+                    WHERE tag_id=? AND sample_time>=? AND sample_time<=?
+                    ORDER BY sample_time ASC
+                    LIMIT ?
+                    """,
+                    (tag_id, start, end, limit_per_tag),
+                ).fetchall()
+                points = [row_to_dict(row) for row in rows]
             series.append(
                 {
                     "tag": row_to_dict(tag),
-                    "points": [row_to_dict(row) for row in rows],
+                    "points": points,
                 }
             )
-    return {"start_time": start, "end_time": end, "series": series}
+    return {"start_time": start, "end_time": end, "interval_minutes": interval_minutes, "series": series}
 
 
 @router.post("/api/history-data/purge")

@@ -406,7 +406,7 @@ def calculate_for_point(
         final = clamp(hold_value, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
         reasons.append("出水TP或进水流量实时数据异常，保留上次计算结果")
         upsert_alarm(con, severity="high", title=f"{point['name']} 关键实时数据异常", category="data", message="出水TP或进水流量不是实时正常数据。", dosing_point_id=dosing_point_id, event_time=now.isoformat())
-        return _persist_and_pack(con, dosing_point_id, now, point, data, "abnormal", "bad", final, final, final, final, reasons, None, tp_forecast, save, source)
+        return _persist_and_pack(con, dosing_point_id, now, point, data, "abnormal", "bad", final, final, final, final, reasons, None, tp_forecast, save, source, control)
 
     clear_alarm(con, title=f"{point['name']} 关键实时数据异常", category="data", dosing_point_id=dosing_point_id)
     q_value = float(q.value or 0)
@@ -438,14 +438,14 @@ def calculate_for_point(
         final = float(control["pac_max_l_h"])
         reasons.append("实时出水TP高于上限，直接输出最大加药流量")
         upsert_alarm(con, severity="high", title=f"{point['name']} 出水TP高于上限", category="data", message=f"实时出水TP {current_tp_value:.4g} mg/L 高于上限 {float(control['tp_upper_mg_l']):.4g} mg/L。", dosing_point_id=dosing_point_id, event_time=now.isoformat())
-        return _persist_and_pack(con, dosing_point_id, now, point, data, "conservative", "good", final, final, final, final, reasons, None, tp_forecast, save, source)
+        return _persist_and_pack(con, dosing_point_id, now, point, data, "conservative", "good", final, final, final, final, reasons, None, tp_forecast, save, source, control)
     clear_alarm(con, title=f"{point['name']} 出水TP高于上限", category="data", dosing_point_id=dosing_point_id)
 
     limited = clamp(raw, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
     final = limited
     if abs(limited - raw) > 1e-9:
         reasons.append("建议值已按最小/最大 L/h 限幅")
-    return _persist_and_pack(con, dosing_point_id, now, point, data, mode, "good", base, raw, limited, final, reasons, ai_detail, tp_forecast, save, source)
+    return _persist_and_pack(con, dosing_point_id, now, point, data, mode, "good", base, raw, limited, final, reasons, ai_detail, tp_forecast, save, source, control)
 
 
 def optimize_pac_by_tp_forecast_model(
@@ -559,6 +559,7 @@ def _persist_and_pack(
     tp_forecast: dict[str, Any] | None,
     save: bool,
     source: str,
+    control: sqlite3.Row | None = None,
 ) -> dict[str, Any]:
     recommendation_id: int | None = None
     explanation = {
@@ -573,6 +574,7 @@ def _persist_and_pack(
         "created_at": utc_now_iso(),
     }
     if save:
+        write_virtual_point_samples(con, dosing_point_id, now, mode, tp_forecast, final, control)
         recommendation_columns = {row["name"] for row in con.execute("PRAGMA table_info(recommendations)").fetchall()}
         if {"k_feedback", "k_ai"} <= recommendation_columns:
             cur = con.execute(
@@ -619,6 +621,53 @@ def _persist_and_pack(
         "tp_forecast": tp_forecast,
         "data": {key: datapoint_to_dict(value) for key, value in data.items()},
     }
+
+
+def write_virtual_point_samples(
+    con: sqlite3.Connection,
+    dosing_point_id: int,
+    now: datetime,
+    mode: str,
+    tp_forecast: dict[str, Any] | None,
+    final_l_h: float,
+    control: sqlite3.Row | None,
+) -> None:
+    point = con.execute("SELECT code FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
+    if not point:
+        return
+    from app.api.dosing_points import ensure_virtual_point_tags
+    ensure_virtual_point_tags(con, dosing_point_id, point["code"])
+    tags = {
+        row["tag_type"]: row
+        for row in con.execute(
+            "SELECT id, tag_type, last_history_at FROM sensor_tags WHERE dosing_point_id=? AND tag_type IN ('PREDICT_TP','RECOMMEND_PAC')",
+            (dosing_point_id,),
+        ).fetchall()
+    }
+    interval = int(control["calculation_interval_seconds"]) if control and control["calculation_interval_seconds"] else 60
+    now_iso = now.isoformat()
+    if "PREDICT_TP" in tags and tp_forecast and tp_forecast.get("predicted_tp_out") is not None:
+        last_history = parse_dt(tags["PREDICT_TP"]["last_history_at"])
+        if last_history is None or (now - last_history).total_seconds() >= interval:
+            con.execute(
+                "INSERT INTO sensor_samples(tag_id,value,unit,sample_time,receive_time,quality,source) VALUES(?,?,?,?,?,?,?)",
+                (tags["PREDICT_TP"]["id"], tp_forecast["predicted_tp_out"], "mg/L", now_iso, now_iso, "good", "computed"),
+            )
+            con.execute(
+                "UPDATE sensor_tags SET last_history_at=?, last_value_text=?, last_quality='good', last_read_at=? WHERE id=?",
+                (now_iso, str(tp_forecast["predicted_tp_out"]), now_iso, tags["PREDICT_TP"]["id"]),
+            )
+    if "RECOMMEND_PAC" in tags and mode != "abnormal":
+        last_history = parse_dt(tags["RECOMMEND_PAC"]["last_history_at"])
+        if last_history is None or (now - last_history).total_seconds() >= interval:
+            con.execute(
+                "INSERT INTO sensor_samples(tag_id,value,unit,sample_time,receive_time,quality,source) VALUES(?,?,?,?,?,?,?)",
+                (tags["RECOMMEND_PAC"]["id"], final_l_h, "L/h", now_iso, now_iso, "good", "computed"),
+            )
+            con.execute(
+                "UPDATE sensor_tags SET last_history_at=?, last_value_text=?, last_quality='good', last_read_at=? WHERE id=?",
+                (now_iso, str(final_l_h), now_iso, tags["RECOMMEND_PAC"]["id"]),
+            )
 
 
 def recalculate_all(con: sqlite3.Connection) -> list[dict[str, Any]]:

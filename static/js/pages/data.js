@@ -338,6 +338,9 @@ async function loadHistoryData() {
     start_time: state.historyStart,
     end_time: state.historyEnd,
   });
+  if (state.historyViewMode === "table" && state.historyTableIntervalMinutes) {
+    params.set("interval_minutes", String(state.historyTableIntervalMinutes));
+  }
   return api(`/api/history-data?${params.toString()}`);
 }
 
@@ -347,19 +350,31 @@ function historyLegend(series) {
 
 function historyTable(series) {
   if (!series.length) return `<div class="empty">请选择左侧采集点</div>`;
+  const maxLen = Math.max(...series.map((item) => item.points.length));
+  if (!maxLen) return `<div class="empty">所选时间范围内无历史数据</div>`;
+  const timestamps = series[0].points.map((p) => p.sample_time);
   return `
-    <div class="history-table-grid">
-      ${series.map((item) => `
-        <table class="history-sample-table">
-          <thead>
-            <tr><th colspan="2">${htmlEscape(item.tag.tag_code)}</th></tr>
-            <tr><th>时间</th><th>数据值${item.tag.unit ? ` (${htmlEscape(item.tag.unit)})` : ""}</th></tr>
-          </thead>
-          <tbody>
-            ${item.points.length ? item.points.map((point) => `<tr><td>${dateMinute(point.sample_time)}</td><td>${fmtCompact(point.value, 4)}</td></tr>`).join("") : `<tr><td colspan="2" class="muted">无历史数据</td></tr>`}
-          </tbody>
-        </table>
-      `).join("")}
+    <div class="history-table-wrap">
+      <table class="history-sample-table unified-table">
+        <thead>
+          <tr>
+            <th>时间</th>
+            ${series.map((item) => `<th>${htmlEscape(item.tag.tag_code)}${item.tag.unit ? ` (${htmlEscape(item.tag.unit)})` : ""}</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${timestamps.map((ts, idx) => `
+            <tr>
+              <td>${dateMinute(ts)}</td>
+              ${series.map((item) => {
+                const point = item.points[idx];
+                const val = point && point.value != null ? fmtCompact(point.value, 2) : "—";
+                return `<td>${val}</td>`;
+              }).join("")}
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
     </div>
   `;
 }
@@ -483,6 +498,41 @@ function wireHistoryTooltip(canvas) {
   canvas.addEventListener("mouseleave", () => tooltip.classList.remove("show"));
 }
 
+function exportHistoryTableCsv() {
+  const history = state.historyCache;
+  const series = history.series || [];
+  if (!series.length) {
+    showToast("没有可导出的数据");
+    return;
+  }
+  const timestamps = series[0].points.map((p) => p.sample_time);
+  let csv = "\ufeff";
+  const headers = ["时间", ...series.map((item) => {
+    const name = item.tag.tag_code;
+    return item.tag.unit ? `${name}(${item.tag.unit})` : name;
+  })];
+  csv += headers.join(",") + "\n";
+  timestamps.forEach((ts, idx) => {
+    const row = [ts.replace("T", " ")];
+    series.forEach((item) => {
+      const point = item.points[idx];
+      const val = point && point.value != null ? Number(point.value).toFixed(2) : "";
+      row.push(val);
+    });
+    csv += row.join(",") + "\n";
+  });
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const link = document.createElement("a");
+  const startStr = (state.historyStart || "").replace("T", "_").replace(/:/g, "-");
+  const endStr = (state.historyEnd || "").replace("T", "_").replace(/:/g, "-");
+  link.href = URL.createObjectURL(blob);
+  link.download = `历史数据_${startStr}_${endStr}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(link.href);
+}
+
 async function renderTrends(main) {
   ensureHistoryRange();
   const tree = await api("/api/collection");
@@ -502,6 +552,10 @@ async function renderTrends(main) {
           <div class="history-controls">
             <label>开始 <input id="historyStart" class="compact-input" type="datetime-local" value="${htmlEscape(state.historyStart)}"></label>
             <label>结束 <input id="historyEnd" class="compact-input" type="datetime-local" value="${htmlEscape(state.historyEnd)}"></label>
+            ${state.historyViewMode === "table" ? `
+              <label>间隔 <input id="historyInterval" class="compact-input history-days-input" type="number" min="1" max="1440" step="1" value="${htmlEscape(state.historyTableIntervalMinutes)}"> 分钟</label>
+              <button id="exportTableBtn" class="btn ghost" type="button">${icon("i-download")}导出CSV</button>
+            ` : ""}
             <label>清理 <input id="historyPurgeDays" class="compact-input history-days-input" type="number" min="1" max="3650" step="1" value="${htmlEscape(state.historyPurgeDays)}"> 天以前</label>
             <button id="purgeHistoryBtn" class="btn danger" type="button">清理历史</button>
             <button class="seg ${state.historyViewMode === "chart" ? "active" : ""}" data-history-mode="chart" type="button">曲线</button>
@@ -550,6 +604,14 @@ async function renderTrends(main) {
     event.target.value = state.historyPurgeDays;
   });
   document.getElementById("purgeHistoryBtn").addEventListener("click", purgeHistoryData);
+  if (state.historyViewMode === "table") {
+    document.getElementById("historyInterval").addEventListener("change", async (event) => {
+      state.historyTableIntervalMinutes = Math.max(1, Math.min(1440, Number(event.target.value || 60)));
+      event.target.value = state.historyTableIntervalMinutes;
+      await renderPage();
+    });
+    document.getElementById("exportTableBtn").addEventListener("click", exportHistoryTableCsv);
+  }
   document.querySelectorAll("[data-history-mode]").forEach((button) => button.addEventListener("click", async () => {
     state.historyViewMode = button.dataset.historyMode;
     await renderPage();

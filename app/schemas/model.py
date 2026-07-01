@@ -16,14 +16,12 @@ class ModelPublishIn(BaseModel):
 class ModelProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     dosing_point_id: int | None = None
-    sample_interval_minutes: int = Field(default=5, ge=1, le=1440)
     model_kind: ModelKind = "tp_out_response"
     training_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelProjectUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    sample_interval_minutes: int = Field(ge=1, le=1440)
     training_config: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -35,10 +33,6 @@ class ModelSampleImportIn(BaseModel):
 
 class ModelSampleBulkDeleteIn(BaseModel):
     sample_ids: list[int] = Field(min_length=1)
-
-
-class ModelRecordingIn(BaseModel):
-    sample_interval_minutes: int = Field(default=5, ge=1, le=1440)
 
 
 class ModelDeployIn(BaseModel):

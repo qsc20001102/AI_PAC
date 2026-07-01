@@ -44,6 +44,11 @@ TAG_DEFS = [
     ("BIO_MLSS2", "生化池MLSS2", "mg/L", 30, 120, 0, 20000),
 ]
 
+VIRTUAL_TAG_DEFS = [
+    ("PREDICT_TP", "预测出水TP", "mg/L", 60, 180, 0, 5),
+    ("RECOMMEND_PAC", "推荐加药流量", "L/h", 10, 60, 0, 200),
+]
+
 
 def latest_recommendation(con, dosing_point_id: int) -> dict[str, Any] | None:
     row = con.execute(
@@ -395,6 +400,14 @@ def create_default_point_tags(con, point_id: int, point_code: str) -> None:
         """,
         [(point_id, f"{point_code}_{tag_type}", tag_type, name, unit, stale, max_stale, min_v, max_v, "s7comm", 1) for tag_type, name, unit, stale, max_stale, min_v, max_v in TAG_DEFS],
     )
+    con.executemany(
+        """
+        INSERT INTO sensor_tags(
+            dosing_point_id,tag_code,tag_type,name,unit,stale_minutes,max_stale_minutes,min_value,max_value,source,enabled,history_enabled
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        [(point_id, f"{point_code}_{tag_type}", tag_type, name, unit, stale, max_stale, min_v, max_v, "computed", 1, 1) for tag_type, name, unit, stale, max_stale, min_v, max_v in VIRTUAL_TAG_DEFS],
+    )
     defaults = {"Q": 0, "TP_BEFORE": 0, "TP_OUT": 0, "PH": 7.2, "PAC_ACTUAL": 0, "TURBIDITY": 0, "BIO_DO1": 2, "BIO_DO2": 2, "BIO_MLSS1": 3000, "BIO_MLSS2": 3000}
     for tag_type, default_value in defaults.items():
         tag = con.execute("SELECT id, unit FROM sensor_tags WHERE dosing_point_id=? AND tag_type=?", (point_id, tag_type)).fetchone()
@@ -408,3 +421,17 @@ def rename_point_tag_codes(con, point_id: int, new_code: str) -> None:
     tags = con.execute("SELECT id, tag_type FROM sensor_tags WHERE dosing_point_id=?", (point_id,)).fetchall()
     for tag in tags:
         con.execute("UPDATE sensor_tags SET tag_code=? WHERE id=?", (f"{new_code}_{tag['tag_type']}", tag["id"]))
+
+
+def ensure_virtual_point_tags(con, point_id: int, point_code: str) -> None:
+    existing = {row["tag_type"] for row in con.execute("SELECT tag_type FROM sensor_tags WHERE dosing_point_id=?", (point_id,)).fetchall()}
+    missing = [(tag_type, name, unit, stale, max_stale, min_v, max_v) for tag_type, name, unit, stale, max_stale, min_v, max_v in VIRTUAL_TAG_DEFS if tag_type not in existing]
+    if missing:
+        con.executemany(
+            """
+            INSERT INTO sensor_tags(
+                dosing_point_id,tag_code,tag_type,name,unit,stale_minutes,max_stale_minutes,min_value,max_value,source,enabled,history_enabled
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [(point_id, f"{point_code}_{tag_type}", tag_type, name, unit, stale, max_stale, min_v, max_v, "computed", 1, 1) for tag_type, name, unit, stale, max_stale, min_v, max_v in missing],
+        )

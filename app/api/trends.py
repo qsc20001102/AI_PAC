@@ -76,6 +76,21 @@ def trends(
             "unit": "L/h",
             "points": [{"time": row["time"], "value": row["final_l_h"], "mode": row["mode"]} for row in rec_rows],
         }
+        for vtype, vname, vunit in (("PREDICT_TP", "预测出水TP", "mg/L"), ("RECOMMEND_PAC", "推荐加药流量", "L/h")):
+            vtag = con.execute(
+                "SELECT id FROM sensor_tags WHERE dosing_point_id=? AND tag_type=?",
+                (dosing_point_id, vtype),
+            ).fetchone()
+            if vtag:
+                rows = con.execute(
+                    "SELECT sample_time AS time, value FROM sensor_samples WHERE tag_id=? AND sample_time>=? ORDER BY sample_time",
+                    (vtag["id"], since),
+                ).fetchall()
+                series[vtype] = {
+                    "name": vname,
+                    "unit": vunit,
+                    "points": [{"time": row["time"], "value": row["value"]} for row in rows],
+                }
     return {"dosing_point_id": dosing_point_id, "hours": hours, "series": series}
 
 

@@ -15,7 +15,6 @@ from app.schemas import (
     ModelProjectCreate,
     ModelProjectUpdate,
     ModelPublishIn,
-    ModelRecordingIn,
     ModelSampleBulkDeleteIn,
     ModelSampleImportIn,
 )
@@ -27,7 +26,6 @@ from app.services.model_training import (
     decode_model_sample_csv_payload,
     import_model_csv_samples,
     normalize_training_config,
-    record_model_project_sample,
     sync_model_feature_schema,
     target_definition_for_kind,
     train_model_project_artifact,
@@ -61,15 +59,14 @@ def create_model_project(payload: ModelProjectCreate) -> dict[str, Any]:
             cur = con.execute(
                 """
                 INSERT INTO model_projects(
-                    name,dosing_point_id,model_kind,status,sample_interval_minutes,feature_schema_json,training_config_json,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?)
+                    name,dosing_point_id,model_kind,status,feature_schema_json,training_config_json,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?)
                 """,
                 (
                     payload.name.strip(),
                     dosing_point_id,
                     payload.model_kind,
                     "draft",
-                    payload.sample_interval_minutes,
                     dumps_json(schema),
                     dumps_json(training_config),
                     now,
@@ -107,10 +104,10 @@ def update_model_project(model_id: int, payload: ModelProjectUpdate) -> dict[str
             con.execute(
                 """
                 UPDATE model_projects
-                SET name=?, sample_interval_minutes=?, training_config_json=?, updated_at=?
+                SET name=?, training_config_json=?, updated_at=?
                 WHERE id=?
                 """,
-                (payload.name.strip(), payload.sample_interval_minutes, dumps_json(training_config), utc_now_iso(), model_id),
+                (payload.name.strip(), dumps_json(training_config), utc_now_iso(), model_id),
             )
         except Exception as exc:
             if "UNIQUE" in str(exc).upper():
@@ -127,44 +124,6 @@ def delete_model_project(model_id: int) -> dict[str, Any]:
         con.execute("DELETE FROM model_projects WHERE id=?", (model_id,))
         audit(con, "local", "delete", "model_project", str(model_id), {"name": model["name"]})
     return {"ok": True}
-
-
-@router.post("/api/models/{model_id}/recording/start")
-def start_model_recording(model_id: int, payload: ModelRecordingIn) -> dict[str, Any]:
-    with db_session() as con:
-        model = model_project_or_404(con, model_id)
-        now = utc_now_iso()
-        con.execute(
-            """
-            UPDATE model_projects
-            SET recording_enabled=1,sample_interval_minutes=?,last_record_at=NULL,updated_at=?
-            WHERE id=?
-            """,
-            (payload.sample_interval_minutes, now, model_id),
-        )
-        audit(con, "local", "recording_start", "model_project", str(model_id), payload.model_dump())
-        return {"ok": True, "model": model_project_detail(con, model["id"])["model"]}
-
-
-@router.post("/api/models/{model_id}/recording/stop")
-def stop_model_recording(model_id: int) -> dict[str, Any]:
-    with db_session() as con:
-        model_project_or_404(con, model_id)
-        con.execute(
-            "UPDATE model_projects SET recording_enabled=0,updated_at=? WHERE id=?",
-            (utc_now_iso(), model_id),
-        )
-        audit(con, "local", "recording_stop", "model_project", str(model_id), {})
-        return {"ok": True, "model": model_project_detail(con, model_id)["model"]}
-
-
-@router.post("/api/models/{model_id}/samples/record")
-def record_model_sample(model_id: int) -> dict[str, Any]:
-    with db_session() as con:
-        model = model_project_or_404(con, model_id)
-        result = record_model_project_sample(con, model)
-        audit(con, "local", "record", "model_training_sample", str(model_id), result)
-        return {"ok": True, **result, "model": model_project_detail(con, model_id)["model"]}
 
 
 @router.delete("/api/models/{model_id}/samples/{sample_id}")
@@ -203,8 +162,8 @@ def clear_model_samples(model_id: int) -> dict[str, Any]:
         con.execute(
             """
             UPDATE model_projects
-            SET recording_enabled=0,status=CASE WHEN status='published' THEN 'published' WHEN trained_at IS NOT NULL THEN 'ready' ELSE 'draft' END,
-                last_record_at=NULL,updated_at=?
+            SET status=CASE WHEN status='published' THEN 'published' WHEN trained_at IS NOT NULL THEN 'ready' ELSE 'draft' END,
+                updated_at=?
             WHERE id=?
             """,
             (utc_now_iso(), model_id),
@@ -271,7 +230,7 @@ def deploy_model_project(model_id: int, payload: ModelDeployIn) -> dict[str, Any
         now = utc_now_iso()
         if payload.enabled:
             con.execute(
-                "UPDATE model_projects SET status='ready',recording_enabled=0,updated_at=? WHERE dosing_point_id=? AND model_kind=? AND status='published'",
+                "UPDATE model_projects SET status='ready',updated_at=? WHERE dosing_point_id=? AND model_kind=? AND status='published'",
                 (now, model["dosing_point_id"], model["model_kind"]),
             )
             status = "published"
@@ -284,7 +243,7 @@ def deploy_model_project(model_id: int, payload: ModelDeployIn) -> dict[str, Any
         con.execute(
             """
             UPDATE model_projects
-            SET status=?, recording_enabled=0, published_by=?, published_at=?, updated_at=?
+            SET status=?, published_by=?, published_at=?, updated_at=?
             WHERE id=?
             """,
             (status, published_by, published_at, now, model_id),
@@ -345,8 +304,8 @@ def model_project_or_404(con, model_id: int):
 def model_project_rows(con) -> list[dict[str, Any]]:
     rows = con.execute(
         """
-        SELECT mp.id,mp.name,mp.model_kind,mp.dosing_point_id,mp.status,mp.recording_enabled,mp.last_record_at,
-            mp.trained_at,mp.published_by,mp.published_at,mp.created_at,mp.updated_at,mp.sample_interval_minutes,mp.metrics_json,
+        SELECT mp.id,mp.name,mp.model_kind,mp.dosing_point_id,mp.status,
+            mp.trained_at,mp.published_by,mp.published_at,mp.created_at,mp.updated_at,mp.metrics_json,
             dp.name AS dosing_point_name, dp.code AS dosing_point_code,
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
@@ -361,14 +320,14 @@ def model_project_rows(con) -> list[dict[str, Any]]:
 def model_project_summary_rows(con) -> list[dict[str, Any]]:
     rows = con.execute(
         """
-        SELECT mp.id,mp.name,mp.model_kind,mp.dosing_point_id,mp.status,mp.recording_enabled,
-            mp.trained_at,mp.published_at,mp.sample_interval_minutes,mp.metrics_json,
+        SELECT mp.id,mp.name,mp.model_kind,mp.dosing_point_id,mp.status,
+            mp.trained_at,mp.published_at,mp.metrics_json,
             dp.name AS dosing_point_name,
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
         LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
         WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict')
-        ORDER BY CASE mp.status WHEN 'published' THEN 0 WHEN 'recording' THEN 1 WHEN 'ready' THEN 2 ELSE 3 END,
+        ORDER BY CASE mp.status WHEN 'published' THEN 0 WHEN 'ready' THEN 1 ELSE 2 END,
                  mp.updated_at DESC,mp.id DESC
         """
     ).fetchall()

@@ -25,9 +25,9 @@ from app.database import (
     utc_now_iso,
 )
 from app.services.collection_runtime import collection_loop
-from app.services.model_training import model_recording_loop
 from app.services.plc import disconnect_client
 from app.services.plc_devices import auto_connect_enabled_plc_devices, plc_client_store
+from app.api.dosing_points import ensure_virtual_point_tags
 from app.services.recommendation import recalculate_all
 from app.services.seed import ensure_seed_data
 from app.services.settings_config import get_plc_auto_connect_enabled
@@ -71,19 +71,19 @@ def startup() -> None:
         )
         if get_plc_auto_connect_enabled(con):
             auto_connect_enabled_plc_devices(con)
+        for row in con.execute("SELECT id, code FROM dosing_points ORDER BY id").fetchall():
+            ensure_virtual_point_tags(con, int(row["id"]), row["code"])
         recalculate_all(con)
     app.state.collector_task = asyncio.create_task(collection_loop())
-    app.state.model_recording_task = asyncio.create_task(model_recording_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    for task_name in ("collector_task", "model_recording_task"):
-        task = getattr(app.state, task_name, None)
-        if task:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+    task = getattr(app.state, "collector_task", None)
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
     for client in list(plc_client_store().values()):
         disconnect_client(client)
     plc_client_store().clear()

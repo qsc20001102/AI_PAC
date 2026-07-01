@@ -67,12 +67,10 @@ function modelStatusClass(status) {
 }
 
 function modelDisplayStatusLabel(model) {
-  if (model?.recording_enabled) return "记录中";
   return modelStatusLabel(model.status);
 }
 
 function modelDisplayStatusClass(model) {
-  if (model?.recording_enabled) return "delayed";
   return modelStatusClass(model.status);
 }
 
@@ -92,7 +90,6 @@ function renderNewModelWorkspace() {
             { value: "tp_out_response", label: "下次出水TP预测" },
             { value: "pac_flow_predict", label: "加药流量预测" },
           ], "tp_out_response")}
-          <input name="sample_interval_minutes" type="hidden" value="5">
         </div>
         <div class="btn-row"><button class="btn primary" type="submit">创建并配置样本</button><button class="btn" id="cancelNewModelBtn" type="button">取消</button></div>
       </form>
@@ -105,7 +102,6 @@ function renderModelWorkspace(detail) {
   const metrics = model.metrics || {};
   const artifact = model.artifact || {};
   const sampleTargetLabel = modelTargetLabel(model);
-  const canRecordRealtime = model.dosing_point_id != null;
   const deployHintText = model.model_kind === "pac_flow_predict"
     ? "选择后进入正常模式：模型直接预测实际加药流量，并按工艺参数上下限限幅。"
     : "选择后仅显示预测TP值：用于查看下一次出水TP检测数据，不直接替代加药流量推荐。";
@@ -123,12 +119,6 @@ function renderModelWorkspace(detail) {
           <button class="btn ghost" id="refreshModelSamplesBtn" type="button">刷新样本</button>
           <button class="btn ghost" id="exportModelSamplesBtn" type="button">导出 CSV</button>
           <label class="btn primary file-button" for="modelCsvInput">导入 CSV</label><input id="modelCsvInput" type="file" accept=".csv,text/csv" hidden>
-        </div>
-        <div class="model-recording-row">
-          <label>记录周期(min)<input id="modelRecordInterval" type="number" min="1" max="1440" step="1" value="${htmlEscape(model.sample_interval_minutes || 5)}"></label>
-          <button class="btn ghost" id="recordModelSampleBtn" type="button" ${canRecordRealtime ? "" : "disabled"}>记录当前样本</button>
-          <button class="btn ${model.recording_enabled ? "" : "primary"}" id="toggleModelRecordingBtn" type="button" ${canRecordRealtime ? "" : "disabled"}>${model.recording_enabled ? "关闭实时记录" : "开启实时记录"}</button>
-          <span class="muted">${canRecordRealtime ? (model.recording_enabled ? `实时记录中，上次记录：${dateMinute(model.last_record_at)}` : "实时记录未开启") : "未绑定投加点，请导入 CSV 样本"}</span>
         </div>
         <div class="muted model-sampling-note">${htmlEscape(modelKindLabel(model))}使用${htmlEscape(sampleTargetLabel)}作为标签，标签不会进入输入特征。</div>
         <div class="model-sample-query">
@@ -164,7 +154,6 @@ function renderModelTrainingConfig(model, columns) {
         <div class="model-step-title"><span>1</span><div>模型参数配置</div><small>${htmlEscape(modelTargetLabel(model))}</small></div>
         <div class="model-config-name-row">
           ${field("name", "模型名称", model.name, "text")}
-          <input name="sample_interval_minutes" type="hidden" value="${htmlEscape(model.sample_interval_minutes || 5)}">
           <input name="target_column" type="hidden" value="${htmlEscape(modelTrainingTargetKey(model))}">
           <div class="field model-help" data-help="${modelHelpAttr("target_column", model)}"><label>target_column</label><input type="text" value="${htmlEscape(modelTargetLabel(model))}" disabled></div>
         </div>
@@ -312,7 +301,6 @@ function modelTrainingConfig(model, columns) {
 function modelProjectPayload(form, model, columns) {
   const payload = formObject(form);
   payload.name = String(payload.name || "").trim();
-  payload.sample_interval_minutes = Number(payload.sample_interval_minutes || 5);
   const featureColumns = [...form.querySelectorAll("[data-model-feature-column]:checked")].map((node) => node.dataset.modelFeatureColumn);
   if (!featureColumns.length) return null;
   const monotoneConstraints = {};
@@ -415,8 +403,6 @@ function wireModelWorkspace(detail) {
   document.getElementById("refreshModelSamplesBtn")?.addEventListener("click", async () => { await renderPage(); });
   document.getElementById("exportModelSamplesBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/samples.csv`; });
   document.getElementById("modelCsvInput")?.addEventListener("change", (event) => importModelSamples(model.id, event));
-  document.getElementById("recordModelSampleBtn")?.addEventListener("click", () => recordModelSample(model.id));
-  document.getElementById("toggleModelRecordingBtn")?.addEventListener("click", () => toggleModelRecording(model));
   document.getElementById("trainModelBtn")?.addEventListener("click", () => trainModelProject(model.id));
   document.getElementById("downloadModelArtifactBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/artifact`; });
   document.querySelectorAll("[data-model-sample-delete]").forEach((button) => button.addEventListener("click", () => deleteModelSample(model.id, Number(button.dataset.modelSampleDelete))));
@@ -456,7 +442,6 @@ async function createModelProject(event) {
   event.preventDefault();
   const payload = formObject(event.currentTarget);
   payload.name = String(payload.name || "").trim();
-  payload.sample_interval_minutes = Number(payload.sample_interval_minutes || 5);
   payload.model_kind = payload.model_kind === "pac_flow_predict" ? "pac_flow_predict" : "tp_out_response";
   try {
     const res = await api("/api/models", { method: "POST", body: JSON.stringify(payload) });
@@ -535,31 +520,6 @@ async function clearAllModelSamples(modelId, count) {
     showToast(`已清空 ${res.deleted} 条训练样本`);
     await renderPage();
   } catch (err) { showToast(`清空失败：${err.message}`); }
-}
-
-function modelRecordInterval() {
-  return Math.min(1440, Math.max(1, Number(document.getElementById("modelRecordInterval")?.value || 5)));
-}
-
-async function recordModelSample(modelId) {
-  try {
-    const res = await api(`/api/models/${modelId}/samples/record`, { method: "POST" });
-    showToast(`已记录 1 条训练样本${res.backfilled ? `，回填 ${res.backfilled} 条标签` : ""}`);
-    await renderPage();
-  } catch (err) { showToast(`记录失败：${err.message}`); }
-}
-
-async function toggleModelRecording(model) {
-  const enabled = Boolean(model.recording_enabled);
-  try {
-    const url = `/api/models/${model.id}/recording/${enabled ? "stop" : "start"}`;
-    const options = enabled
-      ? { method: "POST" }
-      : { method: "POST", body: JSON.stringify({ sample_interval_minutes: modelRecordInterval() }) };
-    await api(url, options);
-    showToast(enabled ? "实时记录已关闭" : "实时记录已开启");
-    await renderPage();
-  } catch (err) { showToast(`${enabled ? "关闭" : "开启"}失败：${err.message}`); }
 }
 
 async function trainModelProject(modelId) {

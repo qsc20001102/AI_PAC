@@ -25,6 +25,7 @@
   historyStart: null,
   historyEnd: null,
   historyPurgeDays: 30,
+  historyTableIntervalMinutes: 60,
   historyCache: { series: [] },
   historyColors: {},
   historyChartPoints: [],
@@ -75,6 +76,8 @@ const seriesStyle = {
   BIO_DO2: { color: "#0284c7", label: "生化池DO2 (mg/L)" },
   BIO_MLSS1: { color: "#365314", label: "生化池MLSS1 (mg/L)" },
   BIO_MLSS2: { color: "#4d7c0f", label: "生化池MLSS2 (mg/L)" },
+  PREDICT_TP: { color: "#8b5cf6", label: "预测出水TP (mg/L)" },
+  RECOMMEND_PAC: { color: "#f59e0b", label: "推荐加药流量 (L/h)" },
 };
 
 const statusText = {

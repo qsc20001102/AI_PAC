@@ -1,28 +1,32 @@
-﻿async function renderOverview(main) {
+async function renderOverview(main) {
   const recs = state.dashboard.recommendations;
   const selected = recs.find((item) => item.dosing_point_id === state.selectedPointId) || recs[0];
   if (selected) state.selectedPointId = selected.dosing_point_id;
   main.innerHTML = `
     <section class="overview-card-scroll"><div class="grid overview-grid">${recs.map(metricCard).join("")}</div></section>
     <div class="overview-row-scroll" style="margin-top:14px">
+      <div class="chart-toolbar overview-chart-toolbar">
+        ${[3, 6, 12].map((h) => `<button class="seg ${state.trendHours === h ? "active" : ""}" data-hours="${h}" type="button">${h}h</button>`).join("")}
+      </div>
       <section class="grid overview-row overview-second-row">
       <article class="panel overview-fixed-panel overview-explain-panel">
         <div class="panel-header"><div class="panel-title">推荐解释</div></div>
         <div class="panel-body overview-scroll-body">${explainBlock(selected)}</div>
       </article>
       <article class="panel overview-fixed-panel overview-chart-panel">
-        <div class="panel-header">
-          <div class="panel-title">历史趋势</div>
-          <div class="chart-toolbar">
-            ${[3, 6, 12].map((h) => `<button class="seg ${state.trendHours === h ? "active" : ""}" data-hours="${h}" type="button">${h}h</button>`).join("")}
-          </div>
-        </div>
+        <div class="panel-header"><div class="panel-title">出水TP趋势</div></div>
         <div class="panel-body">
-          <div id="overviewLegend" class="legend"></div>
-          <div class="chart-wrap overview-chart-wrap"><canvas id="overviewChart"></canvas><div id="overviewTooltip" class="chart-tooltip"></div></div>
+          <div id="tpLegend" class="legend"></div>
+          <div class="chart-wrap overview-chart-wrap"><canvas id="tpChart"></canvas><div id="tpTooltip" class="chart-tooltip"></div></div>
         </div>
       </article>
-      ${dataQualityPanel()}
+      <article class="panel overview-fixed-panel overview-chart-panel">
+        <div class="panel-header"><div class="panel-title">加药流量趋势</div></div>
+        <div class="panel-body">
+          <div id="pacLegend" class="legend"></div>
+          <div class="chart-wrap overview-chart-wrap"><canvas id="pacChart"></canvas><div id="pacTooltip" class="chart-tooltip"></div></div>
+        </div>
+      </article>
       </section>
     </div>
     <div class="overview-row-scroll" style="margin-top:14px">
@@ -35,7 +39,7 @@
         <div class="panel-body overview-scroll-body">${alarmList(state.dashboard.alarms, 8)}</div>
       </article>
       ${plcSmallPanel()}
-      ${modelSmallPanel()}
+      ${dataQualityPanel()}
       </section>
     </div>
   `;
@@ -59,7 +63,7 @@
   });
   wireJumpButtons();
   await Promise.all([
-    loadAndDrawTrend("overviewChart", "overviewLegend", state.selectedPointId, state.trendHours),
+    loadAndDrawTrends(state.selectedPointId, state.trendHours),
     refreshOverviewDataQuality(),
   ]);
 }
@@ -202,29 +206,6 @@ function plcSmallPanel() {
   `;
 }
 
-function modelSmallPanel() {
-  const models = state.dashboard.training_models || [];
-  const selectedCount = state.points.reduce((count, point) => count + (point.tp_model_id ? 1 : 0) + (point.pac_flow_model_id ? 1 : 0), 0);
-  const trained = models.filter((model) => ["ready", "published"].includes(model.status)).length;
-  return `
-    <article class="panel">
-      <div class="panel-header"><div class="panel-title">模型管理</div><button class="btn ghost" data-jump="models" type="button">管理模型</button></div>
-      <div class="panel-body model-overview-body">
-        <div class="model-overview-summary"><span>训练模型 <strong>${models.length}</strong></span><span>已训练 <strong>${trained}</strong></span><span>已选择 <strong>${selectedCount}</strong></span></div>
-        ${models.length ? `<div class="model-overview-list">${models.map((model) => {
-          const metrics = model.metrics || {};
-          return `<div class="model-overview-item">
-            <div class="model-overview-name" title="${htmlEscape(model.name)}">${htmlEscape(model.name)}</div>
-            <span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span>
-            <div class="model-overview-meta">${model.sample_count || 0} 条样本</div>
-            <div class="model-overview-meta">${modelKindLabel(model)} · R² ${fmtCompact(metrics.R2, 4)} · MAE ${fmtCompact(metrics.MAE, 4)}</div>
-          </div>`;
-        }).join("")}</div>` : '<div class="empty">暂无训练模型</div>'}
-      </div>
-    </article>
-  `;
-}
-
 function alarmList(rows, limit = 20) {
   const alarms = (rows || []).slice(0, limit);
   if (!alarms.length) return `<div class="empty">当前无活动报警</div>`;
@@ -252,21 +233,26 @@ function wireJumpButtons() {
   }));
 }
 
-async function loadAndDrawTrend(canvasId, legendId, pointId, hours) {
+async function loadAndDrawTrends(pointId, hours) {
   const trend = await api(`/api/trends?dosing_point_id=${pointId}&hours=${hours}`);
   state.trendCache = trend;
-  const keys = ["TP_BEFORE", "TP_OUT", "PAC_ACTUAL"].filter((key) => Object.hasOwn(trend.series || {}, key));
-  state.trendKeys = keys;
-  const legend = document.getElementById(legendId);
-  if (legend) legend.innerHTML = keys.length
-    ? keys.map((key) => `<span class="legend-item"><span class="legend-line" style="background:${seriesStyle[key].color}"></span>${seriesStyle[key].label}</span>`).join("")
-    : `<span class="muted">未配置可展示的数据源</span>`;
-  const canvas = document.getElementById(canvasId);
-  drawChart(canvas, trend.series, keys);
-  wireOverviewTooltip(canvas);
+  const tpKeys = ["TP_OUT", "PREDICT_TP"].filter((key) => Object.hasOwn(trend.series || {}, key));
+  const pacKeys = ["PAC_ACTUAL", "RECOMMEND_PAC"].filter((key) => Object.hasOwn(trend.series || {}, key));
+  renderLegend("tpLegend", tpKeys);
+  renderLegend("pacLegend", pacKeys);
+  drawChart(document.getElementById("tpChart"), trend.series, tpKeys, "tpTooltip");
+  drawChart(document.getElementById("pacChart"), trend.series, pacKeys, "pacTooltip");
 }
 
-function drawChart(canvas, series, keys) {
+function renderLegend(legendId, keys) {
+  const legend = document.getElementById(legendId);
+  if (!legend) return;
+  legend.innerHTML = keys.length
+    ? keys.map((key) => `<span class="legend-item"><span class="legend-line" style="background:${seriesStyle[key].color}"></span>${seriesStyle[key].label}</span>`).join("")
+    : `<span class="muted">未配置可展示的数据源</span>`;
+}
+
+function drawChart(canvas, series, keys, tooltipId) {
   if (!canvas) return;
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -277,74 +263,90 @@ function drawChart(canvas, series, keys) {
   const w = canvas.width / dpr;
   const h = canvas.height / dpr;
   ctx.clearRect(0, 0, w, h);
-  const pad = { l: 44, r: 26, t: 12, b: 32 };
+  const pad = { l: 50, r: 14, t: 12, b: 32 };
   const plotW = w - pad.l - pad.r;
   const plotH = h - pad.t - pad.b;
   ctx.strokeStyle = "#e2e8f0";
   ctx.lineWidth = 1;
-  ctx.font = "12px Microsoft YaHei UI, sans-serif";
+  ctx.font = "11px Microsoft YaHei UI, sans-serif";
   ctx.fillStyle = "#64748b";
+
+  const allTimes = [];
+  const allValues = [];
+  keys.forEach((key) => {
+    (series[key]?.points || []).forEach((p) => {
+      allTimes.push(new Date(p.time).getTime());
+      allValues.push(Number(p.value));
+    });
+  });
+
+  if (!allTimes.length) {
+    ctx.fillText("暂无趋势数据", pad.l + 20, pad.t + 40);
+    return;
+  }
+
+  const minT = Math.min(...allTimes);
+  const maxT = Math.max(...allTimes);
+  const globalMinV = Math.min(...allValues.filter(Number.isFinite));
+  const globalMaxV = Math.max(...allValues.filter(Number.isFinite));
+  const globalSpan = Math.max(globalMaxV - globalMinV, 0.0001);
+
+  // Grid lines + Y-axis labels
   for (let i = 0; i <= 5; i++) {
     const y = pad.t + (plotH / 5) * i;
     ctx.beginPath();
     ctx.moveTo(pad.l, y);
     ctx.lineTo(w - pad.r, y);
     ctx.stroke();
+    const val = globalMaxV - (globalSpan / 5) * i;
+    ctx.fillText(fmtCompact(val, 2), 4, y + 4);
   }
-  const allTimes = [];
-  keys.forEach((key) => (series[key]?.points || []).forEach((p) => allTimes.push(new Date(p.time).getTime())));
-  if (!allTimes.length) {
-    ctx.fillText("暂无趋势数据", pad.l + 20, pad.t + 40);
-    return;
-  }
-  const minT = Math.min(...allTimes);
-  const maxT = Math.max(...allTimes);
-  state.overviewChartPoints = [];
+
+  const chartPoints = [];
   keys.forEach((key) => {
     const points = (series[key]?.points || [])
       .map((point) => ({ time: point.time, t: new Date(point.time).getTime(), value: Number(point.value) }))
       .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.value));
     if (!points.length) return;
-    const values = points.map((p) => Number(p.value)).filter(Number.isFinite);
-    const minV = Math.min(...values);
-    const maxV = Math.max(...values);
-    const span = Math.max(maxV - minV, 0.0001);
     ctx.strokeStyle = seriesStyle[key].color;
-    ctx.lineWidth = key === "PAC_SUGGEST" ? 2 : 1.7;
+    ctx.lineWidth = key === "PREDICT_TP" || key === "RECOMMEND_PAC" ? 2 : 1.7;
+    ctx.setLineDash(key === "PREDICT_TP" || key === "RECOMMEND_PAC" ? [5, 3] : []);
     ctx.beginPath();
     points.forEach((p, idx) => {
-      const x = pad.l + ((new Date(p.time).getTime() - minT) / Math.max(maxT - minT, 1)) * plotW;
-      const y = pad.t + plotH - ((Number(p.value) - minV) / span) * plotH;
+      const x = pad.l + ((p.t - minT) / Math.max(maxT - minT, 1)) * plotW;
+      const y = pad.t + plotH - ((p.value - globalMinV) / globalSpan) * plotH;
       if (idx === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
     if (points.length > 1) ctx.stroke();
+    ctx.setLineDash([]);
 
-    // Sensor history is stored less frequently than recommendations. Keep those
-    // stored points visually prominent while limiting markers on dense ranges.
     const markerStep = Math.max(1, Math.ceil(points.length / 24));
     ctx.fillStyle = seriesStyle[key].color;
     points.forEach((p, idx) => {
       if (idx % markerStep !== 0 && idx !== points.length - 1) return;
       const x = pad.l + ((p.t - minT) / Math.max(maxT - minT, 1)) * plotW;
-      const y = pad.t + plotH - ((p.value - minV) / span) * plotH;
+      const y = pad.t + plotH - ((p.value - globalMinV) / globalSpan) * plotH;
       const isLatest = idx === points.length - 1;
       ctx.beginPath();
       ctx.arc(x, y, isLatest ? 3.6 : 2.5, 0, Math.PI * 2);
       ctx.fill();
-      state.overviewChartPoints.push({ x, y, key, time: p.time, value: p.value, color: seriesStyle[key].color });
+      chartPoints.push({ x, y, key, time: p.time, value: p.value, color: seriesStyle[key].color });
     });
   });
+
   const labels = [minT, minT + (maxT - minT) / 3, minT + (maxT - minT) * 2 / 3, maxT];
   labels.forEach((t) => {
     const x = pad.l + ((t - minT) / Math.max(maxT - minT, 1)) * plotW;
     const d = new Date(t);
     ctx.fillText(`${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`, x - 16, h - 10);
   });
+
+  wireChartTooltip(canvas, tooltipId, chartPoints);
 }
 
-function wireOverviewTooltip(canvas) {
-  const tooltip = document.getElementById("overviewTooltip");
+function wireChartTooltip(canvas, tooltipId, chartPoints) {
+  const tooltip = document.getElementById(tooltipId);
   if (!canvas || !tooltip) return;
   canvas.onmousemove = (event) => {
     const rect = canvas.getBoundingClientRect();
@@ -352,7 +354,7 @@ function wireOverviewTooltip(canvas) {
     const y = event.clientY - rect.top;
     let nearest = null;
     let best = 13;
-    state.overviewChartPoints.forEach((point) => {
+    chartPoints.forEach((point) => {
       const distance = Math.hypot(point.x - x, point.y - y);
       if (distance < best) {
         best = distance;
