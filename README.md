@@ -119,7 +119,7 @@ app/
     recommendation.py        # 推荐计算核心逻辑
     plc.py                   # PLC 连接、地址解析和读值
     plc_devices.py           # PLC 设备运行态、设备列表和事件写入
-    seed.py                  # 演示数据初始化
+    seed.py                  # 空项目基础数据初始化
 static/
   index.html                 # 单页应用入口
   app.js                     # 兼容性语法检查入口
@@ -161,7 +161,7 @@ http://127.0.0.1:8000/
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-首次启动会自动创建 `data/ai_pac.sqlite`，初始化数据库 schema，并写入演示水厂、投加点、采集点、历史样本、报警和模型数据。
+首次启动会自动创建 `data/ai_pac.sqlite` 并初始化数据库 schema。默认只写入运行所需的基础项目骨架，不再生成默认投加点、工艺参数组、模型项目、PLC 设备、采集点、历史样本或报警；这些业务数据需要在页面中手动创建。
 
 ## 验证命令
 
@@ -270,13 +270,13 @@ PLC 页面使用 `plc_devices` 和 `plc_device_events` 表保存设备配置和�
 - 地址范围：`M`、`DB`、`I`、`Q`
 - 数据类型：`REAL`、`BOOL`、`INT`
 
-现场 PLC 侧需要启用 PUT/GET 通讯，并确保 DB 块访问方式、地址规划和采集点配置一致。当前系统只执行读取和模拟写入测试，不写泵启停、频率、手自动模式、联锁旁路或控制强制值。
+现场 PLC 侧需要启用 PUT/GET 通讯，并确保 DB 块访问方式、地址规划和采集点配置一致。当前系统只通过采集点配置读取 PLC 数据，不写泵启停、频率、手自动模式、联锁旁路或控制强制值。
 
 ## 数据和兼容说明
 
 - `data/ai_pac.sqlite` 是本地运行数据库，不建议提交到版本库。
 - `app.database.ensure_runtime_schema()` 包含历史库兼容和补列逻辑，不应随意删除。
-- `forecast_horizon_minutes`、旧版 `dose_predict` 等历史字段/状态仍保留兼容，不代表当前业务入口仍使用这些概念。
+- 启动迁移保持非破坏性：旧版 `pac_configs`、`control_configs`、`model_versions`、`model_shadow_results`、`plc_connections`、`plc_tag_mappings`、`plc_write_tests`、`simulation_runs` 等遗留表会保留；旧模型训练样本会补充 `target_value` 并从 `k_ai` 回填，不删除原列或旧表。
 
 ## 代码规范和维护
 

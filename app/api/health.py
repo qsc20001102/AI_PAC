@@ -17,7 +17,6 @@ BACKEND_STATUS_TABLES = (
     "sensor_samples",
     "recommendations",
     "alarms",
-    "simulation_runs",
     "data_sources",
     "collector_runs",
     "plc_devices",

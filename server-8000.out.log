@@ -83,3 +83,99 @@ INFO:     127.0.0.1:65203 - "GET /api/dashboard HTTP/1.1" 200 OK
 INFO:     127.0.0.1:52167 - "GET /api/dashboard HTTP/1.1" 200 OK
 INFO:     127.0.0.1:50873 - "GET /api/dashboard HTTP/1.1" 200 OK
 INFO:     127.0.0.1:51676 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49234 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58235 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58553 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58553 - "GET /static/js/pages/process.js?v=20260701-curve-pointer-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57362 - "GET /static/styles.css?v=20260701-lan-access-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:57906 - "GET /static/js/state.js?v=20260630-dose-refactor-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:57921 - "GET /static/js/pages/models.js?v=20260701-model-config-cleanup-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54084 - "GET /static/js/pages/overview.js?v=20260630-next-tp-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53292 - "GET /static/js/pages/data.js?v=20260629-split-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:57362 - "GET /static/js/pages/alarms-settings.js?v=20260701-lan-access-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:57921 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54084 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54084 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57921 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54084 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49916 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49916 - "GET /static/styles.css?v=20260701-lan-access-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:53611 - "GET /static/js/state.js?v=20260630-dose-refactor-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:53611 - "GET /static/js/pages/overview.js?v=20260630-next-tp-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49916 - "GET /static/js/pages/process.js?v=20260701-curve-pointer-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54381 - "GET /static/js/pages/data.js?v=20260629-split-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:50451 - "GET /static/js/pages/alarms-settings.js?v=20260701-lan-access-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:54942 - "GET /static/js/pages/models.js?v=20260701-model-config-cleanup-1 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:53611 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49916 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52483 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52483 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61309 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61309 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61309 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52483 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52135 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61843 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52135 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50684 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59261 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50684 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65260 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49691 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49726 - "GET /static/js/boot.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49731 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49731 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63304 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63320 - "GET /static/js/pages/overview.js?v=20260630-next-tp-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63321 - "GET /static/js/pages/process.js?v=20260701-curve-pointer-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63397 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63397 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50260 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63856 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57356 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59569 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57356 - "GET /static/js/state.js?v=20260701-empty-data-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64841 - "GET /static/js/format.js?v=20260701-empty-data-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56053 - "GET /static/js/api.js?v=20260701-empty-data-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63557 - "GET /static/js/boot.js?v=20260701-empty-data-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49909 - "GET /static/js/pages/overview.js?v=20260701-empty-data-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /static/js/pages/process.js?v=20260701-empty-data-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57356 - "GET /static/js/pages/plc.js?v=20260701-empty-data-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57356 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/dosing-points HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/process-parameter-groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/process-parameter-groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/process-parameter-groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/plc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/collection?scope=public HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/collection HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/collection?scope=public HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/collection?scope=public HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/plc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/collection?scope=public HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/collection HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/alarms?status=all HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/collection HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/collection?scope=public HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63282 - "GET /api/process-parameter-groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54764 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60559 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63556 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56663 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56271 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56195 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51059 - "GET /api/collection HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51059 - "GET /api/collection HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51059 - "GET /api/collection HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59549 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64935 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53903 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51899 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61826 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56897 - "GET /api/dashboard HTTP/1.1" 200 OK

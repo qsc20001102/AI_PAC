@@ -13,6 +13,8 @@ async function refreshAll() {
   state.points = points;
   if ((!state.selectedPointId || !points.some((p) => p.id === state.selectedPointId)) && points[0]) {
     state.selectedPointId = points[0].id;
+  } else if (!points.length) {
+    state.selectedPointId = null;
   }
   await renderPage();
 }
@@ -52,7 +54,7 @@ async function renderPage() {
     state.modelRefreshTimer = null;
   }
   const main = document.getElementById("main");
-  if (!state.dashboard || !state.points.length) {
+  if (!state.dashboard) {
     main.innerHTML = `<div class="empty">正在加载系统数据</div>`;
     return;
   }

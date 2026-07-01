@@ -347,8 +347,6 @@ def point_control(con: sqlite3.Connection, point: sqlite3.Row) -> sqlite3.Row:
     if point["process_parameter_group_id"] is not None:
         control = con.execute("SELECT * FROM process_parameter_groups WHERE id=?", (point["process_parameter_group_id"],)).fetchone()
     if not control:
-        control = con.execute("SELECT * FROM process_parameter_groups ORDER BY id LIMIT 1").fetchone()
-    if not control:
         raise ValueError("工艺参数未配置")
     return control
 
@@ -672,7 +670,9 @@ def write_virtual_point_samples(
 
 def recalculate_all(con: sqlite3.Connection) -> list[dict[str, Any]]:
     now = datetime.now().replace(second=0, microsecond=0)
-    rows = con.execute("SELECT id FROM dosing_points WHERE enabled=1 ORDER BY display_order").fetchall()
+    rows = con.execute(
+        "SELECT id FROM dosing_points WHERE enabled=1 AND process_parameter_group_id IS NOT NULL ORDER BY display_order"
+    ).fetchall()
     result = []
     for row in rows:
         point_id = int(row["id"])

@@ -3,13 +3,6 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
-class PlcWriteTestIn(BaseModel):
-    dosing_point_id: int
-    value_l_h: float = Field(ge=0, le=1000)
-    quality: str = "test"
-    mode: str = "simulation"
-
-
 class PlcDeviceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     protocol: str = "s7_1500"

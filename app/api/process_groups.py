@@ -134,10 +134,9 @@ def delete_process_parameter_group(group_id: int) -> dict[str, Any]:
         if not exists:
             raise HTTPException(404, "参数组不存在")
         remaining = con.execute("SELECT id FROM process_parameter_groups WHERE id<>? ORDER BY id LIMIT 1", (group_id,)).fetchone()
-        if not remaining:
-            raise HTTPException(409, "至少保留一个参数组")
-        con.execute("UPDATE dosing_points SET process_parameter_group_id=? WHERE process_parameter_group_id=?", (remaining["id"], group_id))
+        reassigned_to = remaining["id"] if remaining else None
+        con.execute("UPDATE dosing_points SET process_parameter_group_id=? WHERE process_parameter_group_id=?", (reassigned_to, group_id))
         con.execute("DELETE FROM process_parameter_groups WHERE id=?", (group_id,))
-        audit(con, "local", "delete", "process_parameter_group", str(group_id), {"reassigned_to": remaining["id"]})
+        audit(con, "local", "delete", "process_parameter_group", str(group_id), {"reassigned_to": reassigned_to})
         recalculate_all(con)
     return {"ok": True, "deleted_id": group_id}

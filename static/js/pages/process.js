@@ -11,6 +11,25 @@ async function renderProcess(main) {
       <span class="status-tag status-${p.enabled ? "fresh" : "stale"}">${p.enabled ? "启用" : "停用"}</span>
     </div>
   `).join("");
+  if (!state.points.length && !state.editingNewPoint) {
+    main.innerHTML = `
+      <section class="page-grid process-page-grid">
+        <aside class="panel">
+          <div class="panel-header"><div class="panel-title">投加点</div><button id="newPointBtn" class="btn ghost" type="button">新增</button></div>
+          <div class="panel-body process-point-list"><div class="empty">暂无投加点</div></div>
+        </aside>
+        <article class="panel">
+          <div class="panel-header"><div class="panel-title">投加点配置</div></div>
+          <div class="panel-body"><div class="empty">点击左侧“新增”创建第一个投加点。</div></div>
+        </article>
+      </section>
+    `;
+    document.getElementById("newPointBtn").addEventListener("click", async () => {
+      state.editingNewPoint = true;
+      await renderPage();
+    });
+    return;
+  }
   const p = state.editingNewPoint ? defaultNewPoint() : selectedPoint();
   main.innerHTML = `
     <section class="page-grid process-page-grid">
@@ -29,7 +48,7 @@ async function renderProcess(main) {
               ${field("name", "投加点名称", p.name, "text")}
               ${field("code", "投加点编码", p.code, "text")}
               ${selectField("enabled", "启用状态", [{ value: "true", label: "启用" }, { value: "false", label: "停用" }], String(Boolean(p.enabled)))}
-              ${selectField("process_parameter_group_id", "工艺参数组", processParameterGroups.map((group) => ({ value: String(group.id), label: group.name })), p.process_parameter_group_id == null ? "" : String(p.process_parameter_group_id))}
+              ${selectField("process_parameter_group_id", "工艺参数组", [{ value: "", label: "无" }, ...processParameterGroups.map((group) => ({ value: String(group.id), label: group.name }))], p.process_parameter_group_id == null ? "" : String(p.process_parameter_group_id))}
               ${selectField("tp_model_id", "出水TP预测模型", modelSelectOptions(trainedModels, "tp_out_response"), p.tp_model_id == null ? "" : String(p.tp_model_id))}
               ${selectField("pac_flow_model_id", "加药流量预测模型", modelSelectOptions(trainedModels, "pac_flow_predict"), p.pac_flow_model_id == null ? "" : String(p.pac_flow_model_id))}
             </div>
@@ -68,7 +87,19 @@ async function renderProcess(main) {
 async function renderProcessParams(main) {
   const groups = await api("/api/process-parameter-groups");
   if (!groups.length) {
-    main.innerHTML = `<div class="empty">暂无工艺参数组</div>`;
+    main.innerHTML = `
+      <section class="page-grid process-page-grid">
+        <aside class="panel">
+          <div class="panel-header"><div class="panel-title">参数组</div><button id="newProcessParamGroupBtn" class="btn ghost" type="button">新增</button></div>
+          <div class="panel-body process-point-list"><div class="empty">暂无参数组</div></div>
+        </aside>
+        <article class="panel">
+          <div class="panel-header"><div class="panel-title">工艺参数</div></div>
+          <div class="panel-body"><div class="empty">点击左侧“新增”创建第一个工艺参数组。</div></div>
+        </article>
+      </section>
+    `;
+    document.getElementById("newProcessParamGroupBtn").addEventListener("click", createProcessParameterGroup);
     return;
   }
   if (!groups.some((group) => group.id === state.selectedProcessParameterGroupId)) {
@@ -588,11 +619,11 @@ async function saveProcessParameterGroup(event) {
 async function deleteProcessParameterGroup() {
   const groups = await api("/api/process-parameter-groups");
   const current = groups.find((group) => group.id === state.selectedProcessParameterGroupId);
-  if (!current || !window.confirm(`确认删除参数组「${current.name}」？其关联投加点会自动切换到保留的参数组。`)) return;
+  if (!current || !window.confirm(`确认删除参数组「${current.name}」？关联投加点会切换到保留的参数组；没有保留参数组时会解除绑定。`)) return;
   try {
     await api(`/api/process-parameter-groups/${current.id}`, { method: "DELETE" });
     state.selectedProcessParameterGroupId = null;
-    showToast("参数组已删除，关联投加点已自动重分配");
+    showToast("参数组已删除，关联投加点已更新");
     await refreshAll();
   } catch (err) {
     showToast(`删除失败：${err.message}`);

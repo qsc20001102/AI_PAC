@@ -14,7 +14,6 @@ from app.schemas import (
     ModelDeployIn,
     ModelProjectCreate,
     ModelProjectUpdate,
-    ModelPublishIn,
     ModelSampleBulkDeleteIn,
     ModelSampleImportIn,
 )
@@ -283,11 +282,6 @@ def download_model_artifact(model_id: int) -> StreamingResponse:
     )
 
 
-@router.post("/api/models/publish")
-def publish_model(payload: ModelPublishIn) -> dict[str, Any]:
-    raise HTTPException(410, "旧版 K_AI 模型发布接口已删除")
-
-
 def model_feature_schema(con, dosing_point_id: int) -> list[dict[str, Any]]:
     return current_model_feature_schema(con, dosing_point_id)
 
@@ -391,7 +385,7 @@ def model_project_detail(
         params,
     ).fetchall():
         item = row_to_dict(sample)
-        item["target_value"] = item.get("target_value", item.pop("k_ai", None))
+        item["target_value"] = item.get("target_value")
         samples.append(item)
     return {
         "model": model,

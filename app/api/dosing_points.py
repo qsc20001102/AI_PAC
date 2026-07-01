@@ -67,11 +67,6 @@ def latest_recommendation(con, dosing_point_id: int) -> dict[str, Any] | None:
     data = row_to_dict(row)
     data["explanation"] = loads_json(row["explanation_json"], {})
     data.pop("explanation_json", None)
-    data.pop("k_feedback", None)
-    data.pop("k_ai", None)
-    if isinstance(data["explanation"], dict):
-        data["explanation"].pop("k_feedback", None)
-        data["explanation"].pop("k_ai", None)
     return data
 
 
@@ -93,7 +88,7 @@ def dosing_points() -> list[dict[str, Any]]:
         result = []
         for row in rows:
             item = public_dosing_point(row_to_dict(row))
-            item["control_config"] = public_control_config(row_to_dict(con.execute("SELECT * FROM process_parameter_groups WHERE id=?", (row["process_parameter_group_id"],)).fetchone()))
+            item["control_config"] = point_control_config(con, row["process_parameter_group_id"])
             item["latest_recommendation"] = latest_recommendation(con, row["id"])
             item["source_tags"] = source_tag_options(con, row["id"])
             result.append(item)
@@ -125,9 +120,8 @@ def create_dosing_point(payload: DosingPointCreate) -> dict[str, Any]:
         point_id = int(cur.lastrowid)
         create_default_point_tags(con, point_id, payload.code)
         backfill_point_source_tags(con, point_id)
-        assign_default_group(con, point_id)
         audit(con, "local", "create", "dosing_point", str(point_id), payload.model_dump())
-        result = calculate_for_point(con, point_id)
+        result = calculate_for_point(con, point_id) if payload.process_parameter_group_id is not None else None
     return {"ok": True, "id": point_id, "recommendation": result}
 
 
@@ -159,7 +153,7 @@ def update_dosing_point(point_id: int, payload: DosingPointUpdate) -> dict[str, 
         if old_code != payload.code:
             rename_point_tag_codes(con, point_id, payload.code)
         audit(con, "local", "update", "dosing_point", str(point_id), payload.model_dump())
-        result = calculate_for_point(con, point_id) if payload.enabled else None
+        result = calculate_for_point(con, point_id) if payload.enabled and payload.process_parameter_group_id is not None else None
     return {"ok": True, "recommendation": result}
 
 
@@ -169,14 +163,7 @@ def delete_dosing_point(point_id: int) -> dict[str, Any]:
         point = con.execute("SELECT * FROM dosing_points WHERE id=?", (point_id,)).fetchone()
         if not point:
             raise HTTPException(404, "投加点不存在")
-        remaining = con.execute("SELECT COUNT(*) FROM dosing_points WHERE id<>?", (point_id,)).fetchone()[0]
-        if remaining == 0:
-            raise HTTPException(409, "至少保留一个投加点")
         con.execute("UPDATE alarms SET dosing_point_id=NULL WHERE dosing_point_id=?", (point_id,))
-        con.execute("DELETE FROM simulation_runs WHERE dosing_point_id=?", (point_id,))
-        con.execute("DELETE FROM plc_write_tests WHERE dosing_point_id=?", (point_id,))
-        con.execute("DELETE FROM plc_tag_mappings WHERE dosing_point_id=?", (point_id,))
-        con.execute("DELETE FROM model_shadow_results WHERE dosing_point_id=?", (point_id,))
         con.execute("DELETE FROM recommendations WHERE dosing_point_id=?", (point_id,))
         con.execute("DELETE FROM sensor_tags WHERE dosing_point_id=?", (point_id,))
         con.execute("DELETE FROM dosing_points WHERE id=?", (point_id,))
@@ -192,7 +179,7 @@ def point_config(point_id: int) -> dict[str, Any]:
             raise HTTPException(404, "投加点不存在")
         return {
             "point": public_dosing_point(row_to_dict(point)),
-            "control_config": public_control_config(row_to_dict(con.execute("SELECT * FROM process_parameter_groups WHERE id=?", (point["process_parameter_group_id"],)).fetchone())),
+            "control_config": point_control_config(con, point["process_parameter_group_id"]),
         }
 
 
@@ -251,6 +238,13 @@ def public_control_config(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "unit_dose_curve": row.get("unit_dose_curve", []),
         "updated_at": row["updated_at"],
     }
+
+
+def point_control_config(con, group_id: int | None) -> dict[str, Any] | None:
+    if group_id is None:
+        return None
+    row = con.execute("SELECT * FROM process_parameter_groups WHERE id=?", (group_id,)).fetchone()
+    return public_control_config(row_to_dict(row)) if row else None
 
 
 def point_values(payload: DosingPointCreate | DosingPointUpdate, process_line_id: int, display_order: int) -> tuple[Any, ...]:
@@ -338,12 +332,6 @@ def backfill_point_source_tags(con, point_id: int) -> None:
             point_id,
         ),
     )
-
-
-def assign_default_group(con, point_id: int) -> None:
-    params = con.execute("SELECT id FROM process_parameter_groups ORDER BY id LIMIT 1").fetchone()
-    if params:
-        con.execute("UPDATE dosing_points SET process_parameter_group_id=COALESCE(process_parameter_group_id, ?) WHERE id=?", (params["id"], point_id))
 
 
 def validate_dosing_point_payload(con, payload: DosingPointCreate | DosingPointUpdate, point_id: int | None = None) -> None:

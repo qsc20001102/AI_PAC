@@ -162,38 +162,6 @@ CREATE TABLE IF NOT EXISTS process_parameter_groups (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS pac_configs (
-    id INTEGER PRIMARY KEY,
-    dosing_point_id INTEGER NOT NULL UNIQUE REFERENCES dosing_points(id) ON DELETE CASCADE,
-    pac_density_kg_l REAL NOT NULL,
-    al2o3_fraction REAL NOT NULL,
-    effective_factor REAL NOT NULL,
-    al_p_ratio REAL NOT NULL,
-    batch_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS control_configs (
-    id INTEGER PRIMARY KEY,
-    dosing_point_id INTEGER NOT NULL UNIQUE REFERENCES dosing_points(id) ON DELETE CASCADE,
-    tp_target_mg_l REAL NOT NULL,
-    tp_safe_target_mg_l REAL NOT NULL,
-    tp_limit_mg_l REAL NOT NULL,
-    biochemical_phosphorus_removal_efficiency REAL NOT NULL DEFAULT 0.7,
-    pac_min_l_h REAL NOT NULL,
-    pac_max_l_h REAL NOT NULL,
-    single_step_change_ratio REAL NOT NULL,
-    max_increase_l_h_per_min REAL NOT NULL,
-    max_decrease_l_h_per_min REAL NOT NULL,
-    inflow_delay_minutes INTEGER NOT NULL DEFAULT 0,
-    lag_minutes INTEGER NOT NULL,
-    feedback_kp REAL NOT NULL,
-    feedback_min REAL NOT NULL,
-    feedback_max REAL NOT NULL,
-    feedback_window_minutes INTEGER NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS sensor_tags (
     id INTEGER PRIMARY KEY,
     dosing_point_id INTEGER REFERENCES dosing_points(id) ON DELETE CASCADE,
@@ -251,8 +219,6 @@ CREATE TABLE IF NOT EXISTS recommendations (
     recommend_time TEXT NOT NULL,
     mode TEXT NOT NULL,
     base_l_h REAL NOT NULL,
-    k_feedback REAL NOT NULL,
-    k_ai REAL NOT NULL,
     raw_l_h REAL NOT NULL,
     limited_l_h REAL NOT NULL,
     final_l_h REAL NOT NULL,
@@ -267,41 +233,6 @@ CREATE TABLE IF NOT EXISTS recommendation_explanations (
     id INTEGER PRIMARY KEY,
     recommendation_id INTEGER NOT NULL UNIQUE REFERENCES recommendations(id) ON DELETE CASCADE,
     explanation_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS plc_connections (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    protocol TEXT NOT NULL,
-    endpoint TEXT NOT NULL,
-    status TEXT NOT NULL,
-    mode TEXT NOT NULL,
-    last_seen_at TEXT,
-    read_only INTEGER NOT NULL DEFAULT 1,
-    enabled INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS plc_tag_mappings (
-    id INTEGER PRIMARY KEY,
-    dosing_point_id INTEGER NOT NULL REFERENCES dosing_points(id) ON DELETE CASCADE,
-    connection_id INTEGER NOT NULL REFERENCES plc_connections(id) ON DELETE CASCADE,
-    tag_kind TEXT NOT NULL,
-    plc_address TEXT NOT NULL,
-    data_type TEXT NOT NULL,
-    scale REAL NOT NULL DEFAULT 1.0,
-    unit TEXT NOT NULL,
-    read_only INTEGER NOT NULL DEFAULT 1,
-    enabled INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS plc_write_tests (
-    id INTEGER PRIMARY KEY,
-    dosing_point_id INTEGER NOT NULL REFERENCES dosing_points(id),
-    value_l_h REAL NOT NULL,
-    quality TEXT NOT NULL,
-    mode TEXT NOT NULL,
-    simulated INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS plc_devices (
@@ -347,38 +278,6 @@ CREATE TABLE IF NOT EXISTS alarms (
 );
 
 CREATE INDEX IF NOT EXISTS idx_alarms_status_time ON alarms(status, event_time DESC);
-
-CREATE TABLE IF NOT EXISTS model_versions (
-    id INTEGER PRIMARY KEY,
-    version TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL,
-    train_start TEXT,
-    train_end TEXT,
-    metrics_json TEXT NOT NULL,
-    coefficients_json TEXT NOT NULL,
-    published_by TEXT,
-    published_at TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS model_shadow_results (
-    id INTEGER PRIMARY KEY,
-    model_version_id INTEGER NOT NULL REFERENCES model_versions(id) ON DELETE CASCADE,
-    dosing_point_id INTEGER NOT NULL REFERENCES dosing_points(id) ON DELETE CASCADE,
-    sample_time TEXT NOT NULL,
-    k_ai_pred REAL NOT NULL,
-    k_actual REAL,
-    error_abs REAL
-);
-
-CREATE TABLE IF NOT EXISTS simulation_runs (
-    id INTEGER PRIMARY KEY,
-    dosing_point_id INTEGER NOT NULL REFERENCES dosing_points(id),
-    input_json TEXT NOT NULL,
-    result_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    operator TEXT NOT NULL DEFAULT 'local'
-);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY,
@@ -492,7 +391,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             sample_time TEXT NOT NULL,
             values_json TEXT NOT NULL DEFAULT '{}',
             suggested_l_h REAL,
-            k_ai REAL,
+            target_value REAL,
             source TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
@@ -544,42 +443,9 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             "inflow_delay_minutes": "INTEGER NOT NULL DEFAULT 0",
         },
     )
-    ensure_columns(
-        con,
-        "control_configs",
-        {
-            "biochemical_phosphorus_removal_efficiency": "REAL NOT NULL DEFAULT 0.7",
-            "inflow_delay_minutes": "INTEGER NOT NULL DEFAULT 0",
-        },
-    )
     con.execute("UPDATE dosing_points SET phosphorus_source='po4' WHERE phosphorus_source='po4_priority'")
     con.execute("UPDATE dosing_points SET phosphorus_source='in_tp' WHERE phosphorus_source='tp_before'")
     con.execute("UPDATE dosing_points SET zone_flow_tag_id=NULL WHERE zone_flow_tag_id IS NOT NULL")
-    con.execute(
-        """
-        UPDATE chemical_groups
-        SET al2o3_fraction=(
-            SELECT pc.al2o3_fraction
-            FROM pac_configs pc
-            WHERE pc.batch_id=chemical_groups.batch_id
-            ORDER BY pc.id
-            LIMIT 1
-        )
-        WHERE EXISTS (
-            SELECT 1 FROM pac_configs pc WHERE pc.batch_id=chemical_groups.batch_id
-        )
-        """
-    )
-    con.execute(
-        """
-        UPDATE chemical_groups
-        SET al2o3_fraction=0.018
-        WHERE al2o3_fraction=1.0
-          AND NOT EXISTS (
-            SELECT 1 FROM pac_configs pc WHERE pc.batch_id=chemical_groups.batch_id
-          )
-        """
-    )
     # `tag_code` is the only collection-point name. Keep the legacy display-name
     # column synchronized so historical databases cannot surface a second alias.
     con.execute("UPDATE sensor_tags SET name=tag_code WHERE name<>tag_code")
@@ -609,6 +475,8 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             "training_config_json": "TEXT NOT NULL DEFAULT '{}'",
         },
     )
+    backfill_parameter_groups(con)
+    ensure_model_training_samples_target_value(con)
     sanitize_model_training_configs(con)
     # Recording is runtime activity, not a model lifecycle state. Restore models
     # that were previously published before recording was started.
@@ -624,8 +492,23 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
     backfill_process_source_tags(con)
     ensure_learning_source_tags(con)
     backfill_in_ph_source_tags(con)
-    backfill_parameter_groups(con)
     backfill_point_model_selections(con)
+
+
+def table_exists(con: sqlite3.Connection, table: str) -> bool:
+    row = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def ensure_model_training_samples_target_value(con: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(model_training_samples)").fetchall()}
+    if "target_value" not in columns:
+        con.execute("ALTER TABLE model_training_samples ADD COLUMN target_value REAL")
+    if "k_ai" in columns:
+        con.execute("UPDATE model_training_samples SET target_value=COALESCE(target_value, k_ai)")
 
 
 def sanitize_model_training_configs(con: sqlite3.Connection) -> None:
@@ -730,15 +613,17 @@ def backfill_point_model_selections(con: sqlite3.Connection) -> None:
 
 def backfill_parameter_groups(con: sqlite3.Connection) -> None:
     now = utc_now_iso()
-    pac_rows = con.execute(
-        """
-        SELECT pc.*, dp.name AS point_name
-        FROM pac_configs pc
-        JOIN dosing_points dp ON dp.id=pc.dosing_point_id
-        WHERE dp.chemical_group_id IS NULL
-        ORDER BY pc.id
-        """
-    ).fetchall()
+    pac_rows = []
+    if table_exists(con, "pac_configs"):
+        pac_rows = con.execute(
+            """
+            SELECT pc.*, dp.name AS point_name
+            FROM pac_configs pc
+            JOIN dosing_points dp ON dp.id=pc.dosing_point_id
+            WHERE dp.chemical_group_id IS NULL
+            ORDER BY pc.id
+            """
+        ).fetchall()
     for row in pac_rows:
         batch_id = row["batch_id"] or f"{row['point_name']}-药剂"
         existing = con.execute("SELECT id FROM chemical_groups WHERE batch_id=?", (batch_id,)).fetchone()
@@ -762,15 +647,17 @@ def backfill_parameter_groups(con: sqlite3.Connection) -> None:
             group_id = int(cur.lastrowid)
         con.execute("UPDATE dosing_points SET chemical_group_id=? WHERE id=?", (group_id, row["dosing_point_id"]))
 
-    control_rows = con.execute(
-        """
-        SELECT cc.*, dp.name AS point_name
-        FROM control_configs cc
-        JOIN dosing_points dp ON dp.id=cc.dosing_point_id
-        WHERE dp.process_parameter_group_id IS NULL
-        ORDER BY cc.id
-        """
-    ).fetchall()
+    control_rows = []
+    if table_exists(con, "control_configs"):
+        control_rows = con.execute(
+            """
+            SELECT cc.*, dp.name AS point_name
+            FROM control_configs cc
+            JOIN dosing_points dp ON dp.id=cc.dosing_point_id
+            WHERE dp.process_parameter_group_id IS NULL
+            ORDER BY cc.id
+            """
+        ).fetchall()
     for row in control_rows:
         name = f"{row['point_name']}-工艺参数"
         existing = con.execute("SELECT id FROM process_parameter_groups WHERE name=?", (name,)).fetchone()

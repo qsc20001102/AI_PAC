@@ -1,5 +1,14 @@
 async function renderOverview(main) {
   const recs = state.dashboard.recommendations;
+  if (!recs.length) {
+    main.innerHTML = `
+      <section class="panel">
+        <div class="panel-header"><div class="panel-title">总览</div></div>
+        <div class="panel-body"><div class="empty">暂无投加点和推荐结果，请先到工艺配置新增投加点并配置工艺参数。</div></div>
+      </section>
+    `;
+    return;
+  }
   const selected = recs.find((item) => item.dosing_point_id === state.selectedPointId) || recs[0];
   if (selected) state.selectedPointId = selected.dosing_point_id;
   main.innerHTML = `

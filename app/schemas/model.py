@@ -8,11 +8,6 @@ from pydantic import BaseModel, Field
 ModelKind = Literal["tp_out_response", "pac_flow_predict"]
 
 
-class ModelPublishIn(BaseModel):
-    version_id: int
-    actor: str = "local"
-
-
 class ModelProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     dosing_point_id: int | None = None

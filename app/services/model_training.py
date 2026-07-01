@@ -179,8 +179,7 @@ def training_config_for_model(model, kind: str, schema: list[dict[str, Any]]) ->
 
 
 def training_target_column(con) -> str:
-    columns = {row["name"] for row in con.execute("PRAGMA table_info(model_training_samples)").fetchall()}
-    return "target_value" if "target_value" in columns else "k_ai"
+    return "target_value"
 
 
 def insert_training_sample(
@@ -478,7 +477,7 @@ def build_regression_booster(con, model, target_key: str) -> dict[str, Any]:
         values = sample.get("values", {})
         target_value = values.get(target_key)
         if target_value is None:
-            target_value = sample.get("target_value", sample.get("k_ai"))
+            target_value = sample.get("target_value")
         try:
             target_number = float(target_value)
         except (TypeError, ValueError):

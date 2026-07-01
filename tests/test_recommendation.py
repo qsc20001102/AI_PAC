@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.api.models import create_model_project
-from app.database import SCHEMA, dumps_json, ensure_runtime_schema, loads_json
+from app.database import DEFAULT_UNIT_DOSE_CURVE, SCHEMA, dumps_json, ensure_runtime_schema, loads_json
 from app.schemas import ModelProjectCreate
 from app.services.model_training import (
     current_model_feature_schema,
@@ -33,13 +33,105 @@ from app.services.seed import ensure_seed_data
 
 
 class RecommendationFormulaTests(unittest.TestCase):
-    def memory_db(self) -> sqlite3.Connection:
+    def memory_db(self, with_fixture: bool = True) -> sqlite3.Connection:
         con = sqlite3.connect(":memory:")
         con.row_factory = sqlite3.Row
         con.executescript(SCHEMA)
         ensure_runtime_schema(con)
         ensure_seed_data(con)
+        if with_fixture:
+            self.insert_operational_fixture(con)
         return con
+
+    def insert_operational_fixture(self, con: sqlite3.Connection) -> None:
+        now = datetime.now().replace(second=0, microsecond=0).isoformat()
+        con.execute(
+            """
+            INSERT INTO process_parameter_groups(
+                id,name,tp_target_mg_l,tp_limit_mg_l,tp_upper_mg_l,pac_density_kg_l,unit_dose_curve_json,
+                forecast_horizon_minutes,biochemical_phosphorus_removal_efficiency,pac_min_l_h,pac_max_l_h,
+                calculation_interval_seconds,inflow_delay_minutes,lag_minutes,feedback_kp,feedback_min,feedback_max,
+                feedback_window_minutes,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (1, "Test Process Parameters", 0.18, 0.30, 0.30, 1.2, dumps_json(DEFAULT_UNIT_DOSE_CURVE), 120, 0.7, 0.0, 80.0, 60, 0, 60, 0.0, 1.0, 1.0, 60, now),
+        )
+        con.execute(
+            """
+            INSERT INTO dosing_points(id,process_line_id,name,code,enabled,process_parameter_group_id,display_order)
+            VALUES(1,1,'PAC1','PAC1',1,1,1)
+            """
+        )
+        tag_defs = [
+            ("Q", "m3/h", 0, 4000, 1235.0),
+            ("TP_BEFORE", "mg/L", 0, 20, 0.46),
+            ("TP_OUT", "mg/L", 0, 5, 0.18),
+            ("PH", "", 3, 11, 7.2),
+            ("PAC_ACTUAL", "L/h", 0, 200, 36.0),
+            ("BIO_ORP1", "mV", -1000, 1000, -50.0),
+            ("BIO_ORP2", "mV", -1000, 1000, -51.0),
+            ("BIO_ORP3", "mV", -1000, 1000, -52.0),
+            ("BIO_ORP4", "mV", -1000, 1000, -53.0),
+            ("BIO_MLSS1", "mg/L", 0, 20000, 3200.0),
+            ("BIO_MLSS2", "mg/L", 0, 20000, 3300.0),
+        ]
+        tag_ids = {}
+        for index, (tag_type, unit, min_value, max_value, value) in enumerate(tag_defs, start=1):
+            con.execute(
+                """
+                INSERT INTO sensor_tags(
+                    id,dosing_point_id,tag_code,tag_type,name,unit,stale_minutes,max_stale_minutes,
+                    min_value,max_value,source,enabled
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)
+                """,
+                (index, 1, f"PAC1_{tag_type}", tag_type, f"PAC1_{tag_type}", unit, 60, 180, min_value, max_value, "s7comm"),
+            )
+            con.execute(
+                """
+                INSERT INTO sensor_samples(tag_id,value,unit,sample_time,receive_time,quality,source)
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (index, value, unit, now, now, "good", "s7comm"),
+            )
+            tag_ids[tag_type] = index
+        con.execute(
+            """
+            UPDATE dosing_points
+            SET in_flow_tag_id=?, in_tp_tag_id=?, in_ph_tag_id=?, out_tp_tag_id=?, pac_flow_tag_id=?,
+                bio_orp1_tag_id=?, bio_orp2_tag_id=?, bio_orp3_tag_id=?, bio_orp4_tag_id=?,
+                bio_mlss1_tag_id=?, bio_mlss2_tag_id=?, source_configured=1
+            WHERE id=1
+            """,
+            (
+                tag_ids["Q"],
+                tag_ids["TP_BEFORE"],
+                tag_ids["PH"],
+                tag_ids["TP_OUT"],
+                tag_ids["PAC_ACTUAL"],
+                tag_ids["BIO_ORP1"],
+                tag_ids["BIO_ORP2"],
+                tag_ids["BIO_ORP3"],
+                tag_ids["BIO_ORP4"],
+                tag_ids["BIO_MLSS1"],
+                tag_ids["BIO_MLSS2"],
+            ),
+        )
+        con.execute(
+            """
+            INSERT INTO plc_devices(
+                id,name,protocol,ip_address,port,timeout_ms,rack,slot,pdu_length,status,
+                last_connected_at,last_disconnected_at,last_error,enabled,created_at,updated_at
+            ) VALUES(1,'PLC1','s7_1500','192.168.1.10',102,5000,0,0,NULL,'disconnected',NULL,NULL,NULL,1,?,?)
+            """,
+            (now, now),
+        )
+
+    def test_seed_data_starts_with_blank_business_groups(self):
+        con = self.memory_db(with_fixture=False)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM dosing_points").fetchone()[0], 0)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM process_parameter_groups").fetchone()[0], 0)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM model_projects").fetchone()[0], 0)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM plc_devices").fetchone()[0], 0)
 
     def test_unit_dose_curve_interpolation_and_formula(self):
         curve = validate_unit_dose_curve(

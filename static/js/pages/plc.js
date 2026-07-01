@@ -30,7 +30,8 @@ function defaultPlcDevice(index = 1) {
 }
 
 function selectedPlcDevice(devices) {
-  if (state.editingNewPlcDevice || !devices.length) return defaultPlcDevice(devices.length + 1);
+  if (state.editingNewPlcDevice) return defaultPlcDevice(devices.length + 1);
+  if (!devices.length) return null;
   const selected = devices.find((device) => device.id === state.selectedPlcDeviceId) || devices[0];
   state.selectedPlcDeviceId = selected.id;
   return selected;
@@ -55,7 +56,7 @@ async function renderPlc(main) {
   const events = data.events || [];
   const protocols = data.supported_protocols || [{ value: "s7_1500", label: "S7-1500" }];
   const device = selectedPlcDevice(devices);
-  const isNew = state.editingNewPlcDevice || !device.id;
+  const isNew = state.editingNewPlcDevice;
   const deviceRows = devices.length ? devices.map((item) => `
     <div class="list-card plc-device-card ${!state.editingNewPlcDevice && item.id === state.selectedPlcDeviceId ? "active" : ""}" data-plc-device-select="${item.id}">
       <div class="plc-card-name">${htmlEscape(item.name)}</div>
@@ -77,7 +78,7 @@ async function renderPlc(main) {
         <div class="panel-body"><div class="plc-device-list">${deviceRows}</div></div>
       </aside>
       <div class="plc-right-stack">
-      <article class="panel plc-config-panel">
+      ${device ? `<article class="panel plc-config-panel">
         <div class="panel-header">
           <div class="panel-title">${isNew ? "新增 PLC 设备" : "PLC 设备配置"}</div>
           ${isNew ? "" : `<button id="deletePlcDeviceBtn" class="btn" type="button">删除设备</button>`}
@@ -111,7 +112,7 @@ async function renderPlc(main) {
             </div>
           </form>
         </div>
-      </article>
+      </article>` : `<article class="panel plc-config-panel"><div class="panel-header"><div class="panel-title">PLC 设备配置</div></div><div class="panel-body"><div class="empty">点击左侧“新增”创建第一台 PLC 设备。</div></div></article>`}
       <section class="panel plc-events-panel">
       <div class="panel-header"><div class="panel-title">连接事件</div></div>
       <div class="panel-body plc-events-body">
@@ -147,7 +148,7 @@ async function renderPlc(main) {
     state.editingNewPlcDevice = false;
     await renderPage();
   }));
-  document.getElementById("plcDeviceForm").addEventListener("submit", (event) => savePlcDevice(event, isNew, device.id));
+  document.getElementById("plcDeviceForm")?.addEventListener("submit", (event) => savePlcDevice(event, isNew, device.id));
   document.getElementById("deletePlcDeviceBtn")?.addEventListener("click", () => deletePlcDevice(device.id, device.name));
   document.getElementById("connectPlcDeviceBtn")?.addEventListener("click", () => connectPlcDevice(device.id));
   document.getElementById("disconnectPlcDeviceBtn")?.addEventListener("click", () => disconnectPlcDevice(device.id));
