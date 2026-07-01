@@ -16,7 +16,6 @@ PROCESS_SOURCE_MAP = [
     ("in_flow_tag_id", "IN_Q", "进水流量", "m3/h"),
     ("in_tp_tag_id", "TP_BEFORE", "进水TP", "mg/L"),
     ("in_ph_tag_id", "PH", "进水PH", ""),
-    ("out_flow_tag_id", "OUT_Q", "出水流量", "m3/h"),
     ("out_tp_tag_id", "TP_OUT", "出水TP", "mg/L"),
     ("reflux_flow_1_tag_id", "REFLUX_Q1", "回流流量1", "m3/h"),
     ("reflux_flow_2_tag_id", "REFLUX_Q2", "回流流量2", "m3/h"),
@@ -25,8 +24,6 @@ PROCESS_SOURCE_MAP = [
     ("bio_orp2_tag_id", "BIO_ORP2", "生化池ORP2", "mV"),
     ("bio_orp3_tag_id", "BIO_ORP3", "生化池ORP3", "mV"),
     ("bio_orp4_tag_id", "BIO_ORP4", "生化池ORP4", "mV"),
-    ("bio_do1_tag_id", "BIO_DO1", "生化池DO1", "mg/L"),
-    ("bio_do2_tag_id", "BIO_DO2", "生化池DO2", "mg/L"),
     ("bio_mlss1_tag_id", "BIO_MLSS1", "生化池MLSS1", "mg/L"),
     ("bio_mlss2_tag_id", "BIO_MLSS2", "生化池MLSS2", "mg/L"),
 ]
@@ -234,14 +231,17 @@ def conservative_formula_l_h(reference_flow_m3_h: float, unit_dose_mg_l: float, 
 
 
 def active_model(con: sqlite3.Connection, dosing_point_id: int, model_kind: str) -> sqlite3.Row | None:
+    field_name = "pac_flow_model_id" if model_kind == "pac_flow_predict" else "tp_model_id"
+    point = con.execute(f"SELECT {field_name} FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
+    if not point or point[field_name] is None:
+        return None
     return con.execute(
         """
         SELECT * FROM model_projects
-        WHERE dosing_point_id=? AND model_kind=? AND status='published' AND trained_at IS NOT NULL
-        ORDER BY published_at DESC,id DESC
+        WHERE id=? AND model_kind=? AND trained_at IS NOT NULL
         LIMIT 1
         """,
-        (dosing_point_id, model_kind),
+        (point[field_name], model_kind),
     ).fetchone()
 
 

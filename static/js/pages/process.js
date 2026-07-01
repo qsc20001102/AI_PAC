@@ -1,4 +1,6 @@
 async function renderProcess(main) {
+  const modelsData = await api("/api/models");
+  const trainedModels = (modelsData.models || []).filter((model) => model.trained_at);
   const processParameterGroups = await api("/api/process-parameter-groups");
   const rows = state.points.map((p) => `
     <div class="list-card ${!state.editingNewPoint && p.id === state.selectedPointId ? "active" : ""}" data-point-select="${p.id}">
@@ -28,6 +30,8 @@ async function renderProcess(main) {
               ${field("code", "投加点编码", p.code, "text")}
               ${selectField("enabled", "启用状态", [{ value: "true", label: "启用" }, { value: "false", label: "停用" }], String(Boolean(p.enabled)))}
               ${selectField("process_parameter_group_id", "工艺参数组", processParameterGroups.map((group) => ({ value: String(group.id), label: group.name })), p.process_parameter_group_id == null ? "" : String(p.process_parameter_group_id))}
+              ${selectField("tp_model_id", "出水TP预测模型", modelSelectOptions(trainedModels, "tp_out_response"), p.tp_model_id == null ? "" : String(p.tp_model_id))}
+              ${selectField("pac_flow_model_id", "加药流量预测模型", modelSelectOptions(trainedModels, "pac_flow_predict"), p.pac_flow_model_id == null ? "" : String(p.pac_flow_model_id))}
             </div>
             <div class="process-source-title">数据来源配置</div>
             <div class="form-grid process-source-grid">
@@ -406,11 +410,22 @@ function defaultNewPoint() {
     bio_do2_tag_id: null,
     bio_mlss1_tag_id: null,
     bio_mlss2_tag_id: null,
+    tp_model_id: null,
+    pac_flow_model_id: null,
     process_parameter_group_id: null,
     source_tags: [],
     display_order: next,
     write_enabled: false,
   };
+}
+
+function modelSelectOptions(models, kind) {
+  return [
+    { value: "", label: "无" },
+    ...models
+      .filter((model) => model.model_kind === kind)
+      .map((model) => ({ value: String(model.id), label: `${model.name}（${dateMinute(model.trained_at)}）` })),
+  ];
 }
 
 function processSourceSelect(name, label, point) {
@@ -441,6 +456,8 @@ function pointFormPayload(form) {
   processSourceFields.forEach(([name]) => {
     payload[name] = payload[name] == null ? null : Number(payload[name]);
   });
+  payload.tp_model_id = payload.tp_model_id == null ? null : Number(payload.tp_model_id);
+  payload.pac_flow_model_id = payload.pac_flow_model_id == null ? null : Number(payload.pac_flow_model_id);
   payload.process_parameter_group_id = payload.process_parameter_group_id == null ? null : Number(payload.process_parameter_group_id);
   return payload;
 }

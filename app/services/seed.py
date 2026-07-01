@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 from app.database import DEFAULT_UNIT_DOSE_CURVE, backfill_process_source_tags, create_time_range, dumps_json, ensure_learning_source_tags, table_count, utc_now_iso
+from app.services.settings_config import DEFAULT_LISTEN_PORT, ensure_default_app_settings
 
 
 def ensure_seed_data(con: sqlite3.Connection) -> None:
@@ -347,12 +348,8 @@ def _ensure_runtime_defaults(con: sqlite3.Connection) -> None:
                 now_iso,
             ),
         )
-    setting = con.execute("SELECT key FROM app_settings WHERE key='demo_live_refresh'").fetchone()
-    if not setting:
-        con.execute(
-            "INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?)",
-            ("demo_live_refresh", "true", now_iso),
-        )
+    ensure_default_app_settings(con)
+    con.execute("DELETE FROM alarms WHERE category='data' AND (title LIKE '%延迟%' OR message LIKE '%延迟%')")
 
 
 def _insert_samples(con: sqlite3.Connection, now: datetime) -> None:
@@ -374,8 +371,6 @@ def _insert_samples(con: sqlite3.Connection, now: datetime) -> None:
         for point_id, item in base.items():
             prefix = item["prefix"]
             if point_id == 4:
-                continue
-            if point_id == 3 and ts > now - timedelta(minutes=42):
                 continue
             q = item["q"] + math.sin(phase) * 65 + rng.uniform(-35, 35)
             po4 = max(item["po4"] + math.sin(phase / 2) * 0.035 + rng.uniform(-0.025, 0.025), 0.02)
@@ -418,13 +413,6 @@ def _insert_samples(con: sqlite3.Connection, now: datetime) -> None:
                     )
                 )
 
-    # Latest edge cases visible on the overview.
-    stale_ts = now - timedelta(minutes=42)
-    for tag_type in ["Q", "PO4_P", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL", "TURBIDITY", "BIO_ORP1", "BIO_ORP2", "BIO_ORP3", "BIO_ORP4", "BIO_DO1", "BIO_DO2", "BIO_MLSS1", "BIO_MLSS2"]:
-        tag = tag_map[f"DEEP_{tag_type}"]
-        value = {"Q": 512, "PO4_P": 0.58, "TP_BEFORE": 0.66, "TP_OUT": 0.31, "PH": 7.14, "PAC_ACTUAL": 15.2, "TURBIDITY": 12, "BIO_ORP1": -40, "BIO_ORP2": -45, "BIO_ORP3": -38, "BIO_ORP4": -50, "BIO_DO1": 2.5, "BIO_DO2": 2.3, "BIO_MLSS1": 3000, "BIO_MLSS2": 3120}.get(tag_type, 0)
-        samples.append((tag["id"], value, tag["unit"], stale_ts.isoformat(), stale_ts.isoformat(), "good", "s7comm"))
-
     for tag_type in ["Q", "PO4_P", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL", "TURBIDITY", "BIO_ORP1", "BIO_ORP2", "BIO_ORP3", "BIO_ORP4", "BIO_DO1", "BIO_DO2", "BIO_MLSS1", "BIO_MLSS2"]:
         tag = tag_map[f"STBY_{tag_type}"]
         value = 7.2 if tag_type == "PH" else (2 if tag_type.startswith("BIO_DO") else (3000 if tag_type.startswith("BIO_MLSS") else 0))
@@ -441,7 +429,6 @@ def _insert_samples(con: sqlite3.Connection, now: datetime) -> None:
 
 def _insert_initial_alarms(con: sqlite3.Connection, now: datetime) -> None:
     rows = [
-        ("high", "出水TP延迟 42min", "data", "深度处理 PAC 出水 TP 数据延迟，反馈修正暂停。", 3, now - timedelta(minutes=42)),
         ("medium", "PAC批次待确认", "chemical", "2#高效池 PAC 药剂批次未完成现场确认。", 2, now - timedelta(minutes=46)),
         ("low", "PLC写入测试通过", "plc", "测试 DB 写入已通过，当前仍处于读写分离。", None, now - timedelta(minutes=62)),
     ]
@@ -456,13 +443,7 @@ def _insert_initial_alarms(con: sqlite3.Connection, now: datetime) -> None:
 
 def _insert_settings(con: sqlite3.Connection, now_iso: str) -> None:
     settings = [
-        ("retention_raw_days", "1095", now_iso),
-        ("retention_alarm_days", "1095", now_iso),
-        ("backup_dir", "backup", now_iso),
-        ("write_policy", "只写建议值，不写启停/频率", now_iso),
-        ("deployment_mode", "local", now_iso),
-        ("demo_live_refresh", "true", now_iso),
-        ("seeded_at", utc_now_iso(), now_iso),
+        ("listen_port", str(DEFAULT_LISTEN_PORT), now_iso),
     ]
     con.executemany(
         "INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?)",

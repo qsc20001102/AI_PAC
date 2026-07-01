@@ -18,8 +18,6 @@ LEARNING_SOURCE_TAG_DEFS = [
     ("bio_orp2_tag_id", "BIO_ORP2", "生化池ORP2", "mV", 10, 60, -1000, 1000, 0),
     ("bio_orp3_tag_id", "BIO_ORP3", "生化池ORP3", "mV", 10, 60, -1000, 1000, 0),
     ("bio_orp4_tag_id", "BIO_ORP4", "生化池ORP4", "mV", 10, 60, -1000, 1000, 0),
-    ("bio_do1_tag_id", "BIO_DO1", "生化池DO1", "mg/L", 10, 60, 0, 20, 2),
-    ("bio_do2_tag_id", "BIO_DO2", "生化池DO2", "mg/L", 10, 60, 0, 20, 2),
     ("bio_mlss1_tag_id", "BIO_MLSS1", "生化池MLSS1", "mg/L", 30, 120, 0, 20000, 3000),
     ("bio_mlss2_tag_id", "BIO_MLSS2", "生化池MLSS2", "mg/L", 30, 120, 0, 20000, 3000),
 ]
@@ -122,6 +120,8 @@ CREATE TABLE IF NOT EXISTS dosing_points (
     bio_do2_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     bio_mlss1_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
     bio_mlss2_tag_id INTEGER REFERENCES sensor_tags(id) ON DELETE SET NULL,
+    tp_model_id INTEGER REFERENCES model_projects(id) ON DELETE SET NULL,
+    pac_flow_model_id INTEGER REFERENCES model_projects(id) ON DELETE SET NULL,
     source_configured INTEGER NOT NULL DEFAULT 0,
     chemical_group_id INTEGER REFERENCES chemical_groups(id) ON DELETE SET NULL,
     process_parameter_group_id INTEGER REFERENCES process_parameter_groups(id) ON DELETE SET NULL,
@@ -467,7 +467,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS model_projects (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
-            dosing_point_id INTEGER NOT NULL REFERENCES dosing_points(id) ON DELETE CASCADE,
+            dosing_point_id INTEGER REFERENCES dosing_points(id) ON DELETE SET NULL,
             model_kind TEXT NOT NULL DEFAULT 'tp_out_response',
             status TEXT NOT NULL DEFAULT 'draft',
             sample_interval_minutes INTEGER NOT NULL DEFAULT 5,
@@ -501,6 +501,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
         ON model_training_samples(model_project_id, sample_time DESC);
         """
     )
+    ensure_model_projects_nullable_dosing_point(con)
     ensure_columns(
         con,
         "dosing_points",
@@ -517,6 +518,10 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             "po4_tag_id": "INTEGER",
             "pac_flow_tag_id": "INTEGER",
             **{field: "INTEGER" for field, *_ in LEARNING_SOURCE_TAG_DEFS},
+            "bio_do1_tag_id": "INTEGER",
+            "bio_do2_tag_id": "INTEGER",
+            "tp_model_id": "INTEGER",
+            "pac_flow_model_id": "INTEGER",
             "source_configured": "INTEGER NOT NULL DEFAULT 0",
             "chemical_group_id": "INTEGER",
             "process_parameter_group_id": "INTEGER",
@@ -619,6 +624,90 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
     ensure_learning_source_tags(con)
     backfill_in_ph_source_tags(con)
     backfill_parameter_groups(con)
+    backfill_point_model_selections(con)
+
+
+def ensure_model_projects_nullable_dosing_point(con: sqlite3.Connection) -> None:
+    columns = con.execute("PRAGMA table_info(model_projects)").fetchall()
+    dosing_point_column = next((row for row in columns if row["name"] == "dosing_point_id"), None)
+    if not dosing_point_column or not int(dosing_point_column["notnull"]):
+        return
+    con.commit()
+    foreign_keys_enabled = int(con.execute("PRAGMA foreign_keys").fetchone()[0])
+    con.execute("PRAGMA foreign_keys=OFF")
+    try:
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS model_projects_new (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                dosing_point_id INTEGER REFERENCES dosing_points(id) ON DELETE SET NULL,
+                model_kind TEXT NOT NULL DEFAULT 'tp_out_response',
+                status TEXT NOT NULL DEFAULT 'draft',
+                sample_interval_minutes INTEGER NOT NULL DEFAULT 5,
+                recording_enabled INTEGER NOT NULL DEFAULT 0,
+                last_record_at TEXT,
+                output_min REAL NOT NULL DEFAULT 0.70,
+                output_max REAL NOT NULL DEFAULT 1.30,
+                feature_schema_json TEXT NOT NULL DEFAULT '[]',
+                training_config_json TEXT NOT NULL DEFAULT '{}',
+                artifact_json TEXT NOT NULL DEFAULT '{}',
+                metrics_json TEXT NOT NULL DEFAULT '{}',
+                trained_at TEXT,
+                published_by TEXT,
+                published_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            INSERT INTO model_projects_new(
+                id,name,dosing_point_id,model_kind,status,sample_interval_minutes,recording_enabled,last_record_at,
+                output_min,output_max,feature_schema_json,training_config_json,artifact_json,metrics_json,
+                trained_at,published_by,published_at,created_at,updated_at
+            )
+            SELECT id,name,dosing_point_id,model_kind,status,sample_interval_minutes,recording_enabled,last_record_at,
+                output_min,output_max,feature_schema_json,training_config_json,artifact_json,metrics_json,
+                trained_at,published_by,published_at,created_at,updated_at
+            FROM model_projects;
+
+            DROP TABLE model_projects;
+            ALTER TABLE model_projects_new RENAME TO model_projects;
+            """
+        )
+    finally:
+        con.execute(f"PRAGMA foreign_keys={foreign_keys_enabled}")
+
+
+def backfill_point_model_selections(con: sqlite3.Connection) -> None:
+    for target_column, kind in (
+        ("tp_model_id", "tp_out_response"),
+        ("pac_flow_model_id", "pac_flow_predict"),
+    ):
+        con.execute(
+            f"""
+            UPDATE dosing_points
+            SET {target_column}=(
+                SELECT mp.id
+                FROM model_projects mp
+                WHERE mp.dosing_point_id=dosing_points.id
+                  AND mp.model_kind=?
+                  AND mp.status='published'
+                  AND mp.trained_at IS NOT NULL
+                ORDER BY mp.published_at DESC, mp.id DESC
+                LIMIT 1
+            )
+            WHERE {target_column} IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM model_projects mp
+                WHERE mp.dosing_point_id=dosing_points.id
+                  AND mp.model_kind=?
+                  AND mp.status='published'
+                  AND mp.trained_at IS NOT NULL
+              )
+            """,
+            (kind, kind),
+        )
 
 
 def backfill_parameter_groups(con: sqlite3.Connection) -> None:

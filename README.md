@@ -140,10 +140,10 @@ docs/
 
 ```powershell
 pip install -r requirements.txt
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+python run_server.py
 ```
 
-访问：
+默认端口为 8000，访问：
 
 ```text
 http://<本机IP>:8000/
@@ -155,7 +155,13 @@ http://<本机IP>:8000/
 http://127.0.0.1:8000/
 ```
 
-系统设置页会显示当前检测到的外部访问地址。若局域网设备无法访问，请检查 Windows 防火墙是否放行 TCP 8000 端口。
+系统设置页会显示当前检测到的外部访问地址，并可配置项目监听端口。修改端口后需要停止当前服务，再使用 `python run_server.py` 重启才会生效；若局域网设备无法访问，请检查 Windows 防火墙是否放行对应 TCP 端口。如果已在系统设置中修改端口，请把以上地址中的 `8000` 替换为配置端口。
+
+也可以手动指定端口启动：
+
+```powershell
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
 首次启动会自动创建 `data/ai_pac.sqlite`，初始化数据库 schema，并写入演示水厂、投加点、采集点、历史样本、报警和模型数据。
 
@@ -219,7 +225,7 @@ $body = @{
 } | ConvertTo-Json -Depth 4
 
 Invoke-RestMethod -Method Post `
-  -Uri http://<本机IP>:8000/api/ingest/samples `
+  -Uri http://<本机IP>:<系统配置端口>/api/ingest/samples `
   -Body $body `
   -ContentType "application/json"
 ```
@@ -273,7 +279,6 @@ PLC 页面使用 `plc_devices` 和 `plc_device_events` 表保存设备配置和�
 - `data/ai_pac.sqlite` 是本地运行数据库，不建议提交到版本库。
 - `app.database.ensure_runtime_schema()` 包含历史库兼容和补列逻辑，不应随意删除。
 - `forecast_horizon_minutes`、旧版 `dose_predict` 等历史字段/状态仍保留兼容，不代表当前业务入口仍使用这些概念。
-- 若不需要内置演示刷新，可在系统设置中将 `demo_live_refresh` 改为 `false`。
 
 ## 代码规范和维护
 

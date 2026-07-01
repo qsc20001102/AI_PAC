@@ -102,7 +102,6 @@ const processSourceFields = [
   ["in_flow_tag_id", "进水流量来源"],
   ["in_tp_tag_id", "进水TP来源"],
   ["in_ph_tag_id", "进水PH来源"],
-  ["out_flow_tag_id", "出水流量来源"],
   ["out_tp_tag_id", "出水TP来源"],
   ["reflux_flow_1_tag_id", "回流流量1来源"],
   ["reflux_flow_2_tag_id", "回流流量2来源"],
@@ -111,8 +110,6 @@ const processSourceFields = [
   ["bio_orp2_tag_id", "生化池ORP2来源"],
   ["bio_orp3_tag_id", "生化池ORP3来源"],
   ["bio_orp4_tag_id", "生化池ORP4来源"],
-  ["bio_do1_tag_id", "生化池DO1来源"],
-  ["bio_do2_tag_id", "生化池DO2来源"],
   ["bio_mlss1_tag_id", "生化池MLSS1来源"],
   ["bio_mlss2_tag_id", "生化池MLSS2来源"],
 ];

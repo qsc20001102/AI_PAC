@@ -1,7 +1,6 @@
 async function renderModels(main) {
   const data = await api("/api/models");
   state.models = data.models || [];
-  const points = data.points || [];
   if (!state.editingNewModel && (!state.selectedModelId || !state.models.some((model) => model.id === state.selectedModelId))) {
     state.selectedModelId = state.models[0]?.id || null;
   }
@@ -9,7 +8,6 @@ async function renderModels(main) {
   const rows = state.models.length ? state.models.map((model) => `
     <button class="list-card model-list-card ${!state.editingNewModel && model.id === state.selectedModelId ? "active" : ""}" data-model-select="${model.id}" type="button">
       <span class="model-list-name">${htmlEscape(model.name)}</span>
-      <span class="muted">${htmlEscape(model.dosing_point_name)}</span>
       <span class="model-list-meta"><span>${modelKindLabel(model)} · ${model.sample_count || 0} 条样本</span><span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span></span>
     </button>
   `).join("") : '<div class="empty">还没有训练模型，请先新建。</div>';
@@ -21,7 +19,7 @@ async function renderModels(main) {
         <div class="panel-body"><div class="model-list">${rows}</div></div>
       </aside>
       <article class="panel model-workspace-panel">
-        ${state.editingNewModel || !selected ? renderNewModelWorkspace(points) : '<div class="panel-body" id="modelWorkspaceLoading">正在加载模型数据</div>'}
+        ${state.editingNewModel || !selected ? renderNewModelWorkspace() : '<div class="panel-body" id="modelWorkspaceLoading">正在加载模型数据</div>'}
       </article>
     </section>
   `;
@@ -59,7 +57,7 @@ async function renderModels(main) {
 }
 
 function modelStatusLabel(status) {
-  return { draft: "待导入", recording: "待导入", ready: "已训练", published: "已投用" }[status] || localizedStatus(status);
+  return { draft: "待导入", recording: "待导入", ready: "已训练", published: "已训练" }[status] || localizedStatus(status);
 }
 
 function modelStatusClass(status) {
@@ -82,15 +80,14 @@ function modelKindLabel(model) {
   return model?.model_kind === "pac_flow_predict" ? "加药流量预测" : "下次出水TP预测";
 }
 
-function renderNewModelWorkspace(points) {
-  const defaultName = `${points[0]?.name || "投加点"}训练模型`;
+function renderNewModelWorkspace() {
+  const defaultName = "训练模型";
   return `
     <div class="panel-header"><div class="panel-title">新建训练模型</div></div>
     <div class="panel-body model-empty-workspace">
       <form id="newModelForm" class="model-create-form">
         <div class="form-grid">
           ${field("name", "模型名称", defaultName, "text")}
-          ${selectField("dosing_point_id", "训练投加点", points.map((point) => ({ value: String(point.id), label: `${point.name} (${point.code})` })), String(points[0]?.id || ""))}
           ${selectField("model_kind", "模型类型", [
             { value: "tp_out_response", label: "下次出水TP预测" },
             { value: "pac_flow_predict", label: "加药流量预测" },
@@ -108,12 +105,13 @@ function renderModelWorkspace(detail) {
   const metrics = model.metrics || {};
   const artifact = model.artifact || {};
   const sampleTargetLabel = modelTargetLabel(model);
+  const canRecordRealtime = model.dosing_point_id != null;
   const deployHintText = model.model_kind === "pac_flow_predict"
-    ? "投用后进入正常模式：模型直接预测实际加药流量，并按工艺参数上下限限幅。"
-    : "投用后仅显示预测TP值：用于查看下一次出水TP检测数据，不直接替代加药流量推荐。";
+    ? "选择后进入正常模式：模型直接预测实际加药流量，并按工艺参数上下限限幅。"
+    : "选择后仅显示预测TP值：用于查看下一次出水TP检测数据，不直接替代加药流量推荐。";
   return `
     <div class="panel-header">
-      <div><div class="panel-title">${htmlEscape(model.name)}</div><div class="muted">训练投加点：${htmlEscape(model.dosing_point_name)}　类型：${modelKindLabel(model)}　状态：<span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span></div></div>
+      <div><div class="panel-title">${htmlEscape(model.name)}</div><div class="muted">类型：${modelKindLabel(model)}　状态：<span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span></div></div>
       <button class="btn" id="deleteModelBtn" type="button">删除模型</button>
     </div>
     <div class="panel-body model-workspace-body">
@@ -128,9 +126,9 @@ function renderModelWorkspace(detail) {
         </div>
         <div class="model-recording-row">
           <label>记录周期(min)<input id="modelRecordInterval" type="number" min="1" max="1440" step="1" value="${htmlEscape(model.sample_interval_minutes || 5)}"></label>
-          <button class="btn ghost" id="recordModelSampleBtn" type="button">记录当前样本</button>
-          <button class="btn ${model.recording_enabled ? "" : "primary"}" id="toggleModelRecordingBtn" type="button">${model.recording_enabled ? "关闭实时记录" : "开启实时记录"}</button>
-          <span class="muted">${model.recording_enabled ? `实时记录中，上次记录：${dateMinute(model.last_record_at)}` : "实时记录未开启"}</span>
+          <button class="btn ghost" id="recordModelSampleBtn" type="button" ${canRecordRealtime ? "" : "disabled"}>记录当前样本</button>
+          <button class="btn ${model.recording_enabled ? "" : "primary"}" id="toggleModelRecordingBtn" type="button" ${canRecordRealtime ? "" : "disabled"}>${model.recording_enabled ? "关闭实时记录" : "开启实时记录"}</button>
+          <span class="muted">${canRecordRealtime ? (model.recording_enabled ? `实时记录中，上次记录：${dateMinute(model.last_record_at)}` : "实时记录未开启") : "未绑定投加点，请导入 CSV 样本"}</span>
         </div>
         <div class="muted model-sampling-note">${htmlEscape(modelKindLabel(model))}使用${htmlEscape(sampleTargetLabel)}作为标签，标签不会进入输入特征。</div>
         <div class="model-sample-query">
@@ -151,9 +149,8 @@ function renderModelWorkspace(detail) {
       </section>
 
       <section class="model-step">
-        <div class="model-step-title"><span>4</span><div>投用</div><small>${model.published_at ? `投用时间：${dateMinute(model.published_at)}` : "未投用"}</small></div>
-        <div class="model-step-actions"><button class="btn ${model.status === "published" ? "" : "primary"}" id="deployModelBtn" type="button" ${model.trained_at ? "" : "disabled"}>${model.status === "published" ? "停止投用" : "投用模型"}</button></div>
-        <div class="muted">${deployHintText}</div>
+        <div class="model-step-title"><span>4</span><div>使用配置</div><small>在工艺配置中选择</small></div>
+        <div class="muted">${deployHintText} 已训练模型可在工艺配置的投加点配置中选择；也可以选择“无”表示不投用模型。</div>
       </section>
     </div>
   `;
@@ -222,7 +219,7 @@ function renderModelTrainingConfig(model, columns) {
             `).join("")}
           </div>
         </div>
-        <div class="btn-row"><button class="btn ghost" type="submit">保存模型参数</button><span class="muted">模型绑定投加点后不可修改，避免混入不同工艺条件的样本。</span></div>
+        <div class="btn-row"><button class="btn ghost" type="submit">保存模型参数</button><span class="muted">模型不绑定投加点；训练完成后到工艺配置中按投加点选择使用。</span></div>
       </form>
     </section>
   `;
@@ -422,7 +419,6 @@ function wireModelWorkspace(detail) {
   document.getElementById("toggleModelRecordingBtn")?.addEventListener("click", () => toggleModelRecording(model));
   document.getElementById("trainModelBtn")?.addEventListener("click", () => trainModelProject(model.id));
   document.getElementById("downloadModelArtifactBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/artifact`; });
-  document.getElementById("deployModelBtn")?.addEventListener("click", () => deployModelProject(model));
   document.querySelectorAll("[data-model-sample-delete]").forEach((button) => button.addEventListener("click", () => deleteModelSample(model.id, Number(button.dataset.modelSampleDelete))));
   document.getElementById("queryModelSamplesBtn")?.addEventListener("click", async () => {
     state.modelSampleStart = document.getElementById("modelSampleStart")?.value || null;
@@ -460,7 +456,6 @@ async function createModelProject(event) {
   event.preventDefault();
   const payload = formObject(event.currentTarget);
   payload.name = String(payload.name || "").trim();
-  payload.dosing_point_id = Number(payload.dosing_point_id);
   payload.sample_interval_minutes = Number(payload.sample_interval_minutes || 5);
   payload.model_kind = payload.model_kind === "pac_flow_predict" ? "pac_flow_predict" : "tp_out_response";
   try {

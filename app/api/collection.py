@@ -16,6 +16,7 @@ from app.services.collection_runtime import (
     poll_collection_rows,
     validate_collection_payload,
 )
+from app.services.plc_devices import plc_device_rows
 
 
 router = APIRouter()
@@ -53,7 +54,7 @@ def latest_samples(dosing_point_id: int | None = None) -> list[dict[str, Any]]:
 def collection_config(dosing_point_id: int | None = None, scope: str | None = None) -> dict[str, Any]:
     with db_session() as con:
         points = [row_to_dict(row) for row in con.execute("SELECT * FROM dosing_points ORDER BY display_order").fetchall()]
-        devices = [row_to_dict(row) for row in con.execute("SELECT * FROM plc_devices ORDER BY id").fetchall()]
+        devices = plc_device_rows(con)
         where = ""
         params: list[Any] = []
         if scope == "public":

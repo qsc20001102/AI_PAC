@@ -4,6 +4,7 @@ import sqlite3
 import unittest
 from datetime import datetime, timedelta
 
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.api.models import create_model_project
@@ -18,6 +19,10 @@ from app.services.model_training import (
     record_model_project_sample,
     train_model_project_artifact,
 )
+from app.services import collection_runtime, plc_devices
+from app.api.settings import validate_setting_value
+from app.services.plc import PlcConnectResult, PlcReadResult
+from app.services.settings_config import ensure_default_app_settings, normalize_listen_port
 from app.services.recommendation import (
     calculate_for_point,
     conservative_formula_l_h,
@@ -106,8 +111,36 @@ class RecommendationFormulaTests(unittest.TestCase):
             ModelProjectCreate(name="投加量预测", dosing_point_id=1, model_kind="dose_predict")
 
     def test_pac_flow_predict_model_kind_is_accepted(self):
-        model = ModelProjectCreate(name="加药流量预测", dosing_point_id=1, model_kind="pac_flow_predict")
+        model = ModelProjectCreate(name="加药流量预测", model_kind="pac_flow_predict")
         self.assertEqual(model.model_kind, "pac_flow_predict")
+        self.assertIsNone(model.dosing_point_id)
+
+    def test_listen_port_setting_validation(self):
+        self.assertEqual(validate_setting_value("listen_port", "9000"), "9000")
+        self.assertEqual(normalize_listen_port("9000"), 9000)
+        with self.assertRaises(HTTPException):
+            validate_setting_value("listen_port", "70000")
+        with self.assertRaises(HTTPException):
+            validate_setting_value("listen_port", "abc")
+        with self.assertRaises(HTTPException):
+            validate_setting_value("demo_live_refresh", "false")
+        with self.assertRaises(HTTPException):
+            validate_setting_value("backup_dir", "backup")
+
+    def test_default_settings_cleanup_obsolete_keys(self):
+        con = self.memory_db()
+        con.execute(
+            "INSERT OR REPLACE INTO app_settings(key,value,updated_at) VALUES(?,?,?)",
+            ("backup_dir", "custom", datetime.now().isoformat()),
+        )
+        con.execute(
+            "INSERT OR REPLACE INTO app_settings(key,value,updated_at) VALUES(?,?,?)",
+            ("demo_live_refresh", "true", datetime.now().isoformat()),
+        )
+        ensure_default_app_settings(con)
+        self.assertIsNone(con.execute("SELECT key FROM app_settings WHERE key='backup_dir'").fetchone())
+        self.assertIsNotNone(con.execute("SELECT key FROM app_settings WHERE key='listen_port'").fetchone())
+        self.assertIsNone(con.execute("SELECT key FROM app_settings WHERE key='demo_live_refresh'").fetchone())
 
     def test_model_inputs_have_no_monotone_constraints(self):
         feature_keys = [
@@ -186,6 +219,7 @@ class RecommendationFormulaTests(unittest.TestCase):
         self.assertEqual(trained["artifact"]["target"], "TP_OUT_NEXT")
         self.assertIn("booster_model", trained["artifact"])
         con.execute("UPDATE model_projects SET status='published',published_at=? WHERE id=?", ("2026-06-26T11:00:00", cur.lastrowid))
+        con.execute("UPDATE dosing_points SET tp_model_id=? WHERE id=1", (cur.lastrowid,))
         result = calculate_for_point(con, 1, save=False)
         self.assertEqual(result["mode"], "conservative")
         self.assertIsNotNone(result["tp_forecast"])
@@ -220,6 +254,7 @@ class RecommendationFormulaTests(unittest.TestCase):
         self.assertEqual(trained["artifact"]["target"], "PAC_ACTUAL")
         self.assertIn("booster_model", trained["artifact"])
         con.execute("UPDATE model_projects SET status='published',published_at=? WHERE id=?", ("2026-06-26T11:00:00", cur.lastrowid))
+        con.execute("UPDATE dosing_points SET pac_flow_model_id=? WHERE id=1", (cur.lastrowid,))
         result = calculate_for_point(con, 1, save=True)
         control = con.execute("SELECT * FROM process_parameter_groups ORDER BY id LIMIT 1").fetchone()
         self.assertEqual(result["mode"], "normal")
@@ -329,6 +364,65 @@ class RecommendationFormulaTests(unittest.TestCase):
         columns = {row["name"] for row in con.execute("PRAGMA table_info(model_training_samples)").fetchall()}
         target_column = "target_value" if "target_value" in columns else "k_ai"
         self.assertIsNotNone(sample[target_column])
+
+    def test_plc_device_rows_do_not_report_connected_without_runtime_client(self):
+        con = self.memory_db()
+        plc_devices.plc_client_store().clear()
+        con.execute("UPDATE plc_devices SET status='connected' WHERE id=1")
+        rows = plc_devices.plc_device_rows(con)
+        device = next(row for row in rows if row["id"] == 1)
+        self.assertFalse(device["runtime_connected"])
+        self.assertEqual(device["status"], "disconnected")
+
+    def test_collection_poll_reconnects_when_db_status_is_connected(self):
+        con = self.memory_db()
+        plc_devices.plc_client_store().clear()
+        tag = con.execute("SELECT id FROM sensor_tags WHERE tag_code='PAC1_Q'").fetchone()
+        con.execute(
+            """
+            UPDATE sensor_tags
+            SET plc_device_id=1,data_address='DB1.0',data_type='REAL',last_read_at=NULL,last_error=NULL
+            WHERE id=?
+            """,
+            (tag["id"],),
+        )
+        con.execute("UPDATE plc_devices SET status='connected',enabled=1 WHERE id=1")
+
+        class FakeClient:
+            def get_connected(self):
+                return True
+
+        original_connect = plc_devices.connect_s7_1500
+        original_read = collection_runtime.read_s7_value
+        try:
+            plc_devices.connect_s7_1500 = lambda **_kwargs: PlcConnectResult(
+                ok=True,
+                status="connected",
+                message="ok",
+                pdu_length=480,
+                client=FakeClient(),
+            )
+            collection_runtime.read_s7_value = lambda _client, address, data_type: PlcReadResult(
+                value=12.5,
+                value_text="12.5",
+                numeric_value=12.5,
+                address=address,
+                data_type=data_type,
+                byte_length=4,
+            )
+            rows = collection_runtime.collection_due_rows(con, dosing_point_id=1, force=False)
+            result = collection_runtime.poll_collection_rows(con, rows, force_history=True)
+        finally:
+            plc_devices.connect_s7_1500 = original_connect
+            collection_runtime.read_s7_value = original_read
+            plc_devices.plc_client_store().clear()
+
+        self.assertEqual(result["read_failed"], 0)
+        self.assertGreaterEqual(result["read_ok"], 1)
+        updated = con.execute("SELECT last_quality,last_value_text,last_error FROM sensor_tags WHERE id=?", (tag["id"],)).fetchone()
+        self.assertEqual(updated["last_quality"], "good")
+        self.assertEqual(updated["last_value_text"], "12.5")
+        self.assertIsNone(updated["last_error"])
 
 
 if __name__ == "__main__":

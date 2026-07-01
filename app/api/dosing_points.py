@@ -112,8 +112,8 @@ def create_dosing_point(payload: DosingPointCreate) -> dict[str, Any]:
                 in_flow_weight,reflux_flow_1_tag_id,reflux_flow_2_tag_id,pac_flow_tag_id,
                 bio_orp1_tag_id,bio_orp2_tag_id,bio_orp3_tag_id,bio_orp4_tag_id,
                 bio_do1_tag_id,bio_do2_tag_id,bio_mlss1_tag_id,bio_mlss2_tag_id,
-                process_parameter_group_id,source_configured,display_order,write_enabled
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                tp_model_id,pac_flow_model_id,process_parameter_group_id,source_configured,display_order,write_enabled
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             point_values(payload, process_line_id, display_order),
         )
@@ -145,7 +145,7 @@ def update_dosing_point(point_id: int, payload: DosingPointUpdate) -> dict[str, 
                 in_flow_weight=?, reflux_flow_1_tag_id=?, reflux_flow_2_tag_id=?, pac_flow_tag_id=?,
                 bio_orp1_tag_id=?, bio_orp2_tag_id=?, bio_orp3_tag_id=?, bio_orp4_tag_id=?,
                 bio_do1_tag_id=?, bio_do2_tag_id=?, bio_mlss1_tag_id=?, bio_mlss2_tag_id=?,
-                process_parameter_group_id=?, source_configured=?,
+                tp_model_id=?, pac_flow_model_id=?, process_parameter_group_id=?, source_configured=?,
                 display_order=?, write_enabled=?
             WHERE id=?
             """,
@@ -220,6 +220,8 @@ def public_dosing_point(row: dict[str, Any]) -> dict[str, Any]:
         "bio_do2_tag_id",
         "bio_mlss1_tag_id",
         "bio_mlss2_tag_id",
+        "tp_model_id",
+        "pac_flow_model_id",
         "process_line_name",
         "line_code",
         "area_name",
@@ -270,6 +272,8 @@ def point_values(payload: DosingPointCreate | DosingPointUpdate, process_line_id
         payload.bio_do2_tag_id,
         payload.bio_mlss1_tag_id,
         payload.bio_mlss2_tag_id,
+        payload.tp_model_id,
+        payload.pac_flow_model_id,
         payload.process_parameter_group_id,
         int(any(getattr(payload, field) is not None for field in PROCESS_SOURCE_TAG_FIELDS)),
         display_order,
@@ -353,6 +357,23 @@ def validate_dosing_point_payload(con, payload: DosingPointCreate | DosingPointU
         params = con.execute("SELECT id FROM process_parameter_groups WHERE id=?", (payload.process_parameter_group_id,)).fetchone()
         if not params:
             raise HTTPException(422, "工艺参数组不存在")
+    validate_point_model_selection(con, payload.tp_model_id, "tp_out_response", "出水TP预测模型")
+    validate_point_model_selection(con, payload.pac_flow_model_id, "pac_flow_predict", "加药流量预测模型")
+
+
+def validate_point_model_selection(con, model_id: int | None, model_kind: str, label: str) -> None:
+    if model_id is None:
+        return
+    model = con.execute(
+        "SELECT id,model_kind,trained_at FROM model_projects WHERE id=?",
+        (model_id,),
+    ).fetchone()
+    if not model:
+        raise HTTPException(422, f"{label}不存在")
+    if model["model_kind"] != model_kind:
+        raise HTTPException(422, f"{label}类型不匹配")
+    if not model["trained_at"]:
+        raise HTTPException(422, f"{label}尚未训练完成")
 
 
 def resolve_process_line_id(con, process_line_id: int | None) -> int:

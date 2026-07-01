@@ -35,24 +35,40 @@ async function renderSettings(main) {
     api("/api/settings/network"),
   ]);
   state.settings = settings;
-  const lanUrls = network.lan_urls || [];
+  const configuredPort = network.configured_port || network.port || 8000;
+  const currentPort = network.current_port || configuredPort;
+  const systemSettings = state.settings.filter((item) => item.key !== "listen_port");
   main.innerHTML = `
     <section class="panel settings-network-panel">
       <div class="panel-header"><div class="panel-title">访问地址</div></div>
       <div class="panel-body settings-network-body">
         <div class="settings-network-card">
-          <div class="kv-label">当前访问</div>
-          <div class="settings-url">${htmlEscape(network.current_url || "")}</div>
+          <div class="kv-label">本机访问</div>
+          <div id="configuredCurrentUrl" class="settings-url"></div>
+          <div class="muted">按 Web端口配置生成。</div>
         </div>
         <div class="settings-network-card">
           <div class="kv-label">外部访问</div>
-          <div class="settings-url-list">
-            ${lanUrls.length ? lanUrls.map((url) => `<div class="settings-url">${htmlEscape(url)}</div>`).join("") : `<div class="muted">未检测到可用的本机 IPv4 地址</div>`}
+          <div id="configuredLanUrls" class="settings-url-list"></div>
+        </div>
+        <div class="settings-network-card">
+          <div class="kv-label">Web端口</div>
+          <div>
+            <div class="settings-port-row">
+              <input id="listenPortInput" class="setting-input settings-port-input" type="number" min="1" max="65535" step="1" value="${htmlEscape(configuredPort)}">
+              <button id="saveListenPortBtn" class="btn ghost" type="button">保存端口</button>
+            </div>
+            <div class="muted">项目 Web 服务监听端口，修改后需要重启服务生效。</div>
+            <div id="portStatusText" class="muted"></div>
+            <div id="restartStatusText"></div>
           </div>
         </div>
         <div class="settings-network-card">
-          <div class="kv-label">监听方式</div>
-          <div><code>${htmlEscape(network.bind_host || "0.0.0.0")}:${htmlEscape(String(network.port || 8000))}</code><div class="muted">同一局域网设备可使用上面的 IP 地址加端口访问；如仍无法访问，请检查 Windows 防火墙是否放行该端口。</div></div>
+          <div class="kv-label">启动命令</div>
+          <div>
+            <code>${htmlEscape(network.recommended_command || "python run_server.py")}</code>
+            <div class="muted">也可使用：<code id="uvicornCommand"></code></div>
+          </div>
         </div>
       </div>
     </section>
@@ -60,16 +76,19 @@ async function renderSettings(main) {
       <div class="panel-header"><div class="panel-title">系统设置</div><button id="backupBtn" class="btn ghost" type="button">立即备份数据库</button></div>
       <div class="panel-body">
         <table class="table">
-          <thead><tr><th>键</th><th>值</th><th>更新时间</th><th>操作</th></tr></thead>
-          <tbody>${state.settings.map((s) => `<tr><td>${htmlEscape(s.key)}</td><td><input class="setting-input" data-setting="${htmlEscape(s.key)}" value="${htmlEscape(s.value)}"></td><td>${dateMinute(s.updated_at)}</td><td><button class="btn ghost" data-save-setting="${htmlEscape(s.key)}" type="button">保存</button></td></tr>`).join("")}</tbody>
+          <thead><tr><th>参数</th><th>中文说明</th><th>值</th><th>更新时间</th><th>操作</th></tr></thead>
+          <tbody>${systemSettings.length ? systemSettings.map(renderSettingRow).join("") : `<tr><td colspan="5" class="empty">暂无其他可配置参数</td></tr>`}</tbody>
         </table>
       </div>
     </section>
   `;
+  updateNetworkPreview(network);
   document.getElementById("backupBtn").addEventListener("click", async () => {
     const res = await api("/api/backup", { method: "POST" });
     showToast(`备份完成：${res.path}`);
   });
+  document.getElementById("saveListenPortBtn")?.addEventListener("click", saveListenPort);
+  document.getElementById("listenPortInput")?.addEventListener("input", () => updateNetworkPreview(network));
   document.querySelectorAll("[data-save-setting]").forEach((btn) => btn.addEventListener("click", async () => {
     const key = btn.dataset.saveSetting;
     const value = document.querySelector(`[data-setting="${CSS.escape(key)}"]`).value;
@@ -77,4 +96,61 @@ async function renderSettings(main) {
     showToast("设置已保存");
     await renderPage();
   }));
+}
+
+function renderSettingRow(s) {
+  const input = s.value_type === "boolean"
+    ? `<select class="setting-input" data-setting="${htmlEscape(s.key)}">
+        <option value="true" ${String(s.value).toLowerCase() === "true" ? "selected" : ""}>开启</option>
+        <option value="false" ${String(s.value).toLowerCase() === "false" ? "selected" : ""}>关闭</option>
+      </select>`
+    : `<input class="setting-input" data-setting="${htmlEscape(s.key)}" value="${htmlEscape(s.value)}">`;
+  return `<tr>
+    <td>${htmlEscape(s.label || s.key)}</td>
+    <td class="muted">${htmlEscape(s.description || "")}</td>
+    <td>${input}</td>
+    <td>${dateMinute(s.updated_at)}</td>
+    <td><button class="btn ghost" data-save-setting="${htmlEscape(s.key)}" type="button">保存</button></td>
+  </tr>`;
+}
+
+function updateNetworkPreview(network) {
+  const portText = String(document.getElementById("listenPortInput")?.value || network.configured_port || network.port || 8000).trim();
+  const port = Number(portText);
+  const validPort = Number.isInteger(port) && port >= 1 && port <= 65535 ? port : (network.configured_port || network.port || 8000);
+  const scheme = network.scheme || "http";
+  const hostname = network.hostname || "127.0.0.1";
+  const ips = network.local_ips || [];
+  const currentPort = network.current_port || validPort;
+  const configuredCurrentUrl = `${scheme}://${hostname}:${validPort}`;
+  const configuredLanUrls = ips.map((ip) => `${scheme}://${ip}:${validPort}/`);
+  const restartRequired = validPort !== currentPort;
+  const currentNode = document.getElementById("configuredCurrentUrl");
+  const lanNode = document.getElementById("configuredLanUrls");
+  const portStatusNode = document.getElementById("portStatusText");
+  const restartNode = document.getElementById("restartStatusText");
+  const commandNode = document.getElementById("uvicornCommand");
+  if (currentNode) currentNode.textContent = configuredCurrentUrl;
+  if (lanNode) {
+    lanNode.innerHTML = configuredLanUrls.length
+      ? configuredLanUrls.map((url) => `<div class="settings-url">${htmlEscape(url)}</div>`).join("")
+      : `<div class="muted">未检测到可用的本机 IPv4 地址</div>`;
+  }
+  if (portStatusNode) portStatusNode.textContent = `当前运行端口：${currentPort}；Web端口配置：${validPort}。`;
+  if (restartNode) {
+    restartNode.className = restartRequired ? "error-text" : "muted";
+    restartNode.textContent = restartRequired ? "当前服务尚未运行在 Web端口配置上，请重启后访问。" : "当前服务已运行在 Web端口配置上。";
+  }
+  if (commandNode) commandNode.textContent = `python -m uvicorn app.main:app --host 0.0.0.0 --port ${validPort}`;
+}
+
+async function saveListenPort() {
+  const value = String(document.getElementById("listenPortInput")?.value || "").trim();
+  try {
+    await api("/api/settings/listen_port", { method: "PUT", body: JSON.stringify({ value }) });
+    showToast("监听端口已保存，重启服务后生效");
+    await renderPage();
+  } catch (err) {
+    showToast(`保存失败：${err.message}`);
+  }
 }

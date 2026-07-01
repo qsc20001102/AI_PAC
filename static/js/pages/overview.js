@@ -204,19 +204,19 @@ function plcSmallPanel() {
 
 function modelSmallPanel() {
   const models = state.dashboard.training_models || [];
-  const publishedCount = models.filter((model) => model.status === "published").length;
+  const selectedCount = state.points.reduce((count, point) => count + (point.tp_model_id ? 1 : 0) + (point.pac_flow_model_id ? 1 : 0), 0);
   const trained = models.filter((model) => ["ready", "published"].includes(model.status)).length;
   return `
     <article class="panel">
       <div class="panel-header"><div class="panel-title">模型管理</div><button class="btn ghost" data-jump="models" type="button">管理模型</button></div>
       <div class="panel-body model-overview-body">
-        <div class="model-overview-summary"><span>训练模型 <strong>${models.length}</strong></span><span>已训练 <strong>${trained}</strong></span><span>已投用 <strong>${publishedCount}</strong></span></div>
+        <div class="model-overview-summary"><span>训练模型 <strong>${models.length}</strong></span><span>已训练 <strong>${trained}</strong></span><span>已选择 <strong>${selectedCount}</strong></span></div>
         ${models.length ? `<div class="model-overview-list">${models.map((model) => {
           const metrics = model.metrics || {};
           return `<div class="model-overview-item">
             <div class="model-overview-name" title="${htmlEscape(model.name)}">${htmlEscape(model.name)}</div>
             <span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span>
-            <div class="model-overview-meta">${htmlEscape(model.dosing_point_name)} · ${model.sample_count || 0} 条</div>
+            <div class="model-overview-meta">${model.sample_count || 0} 条样本</div>
             <div class="model-overview-meta">${modelKindLabel(model)} · R² ${fmtCompact(metrics.R2, 4)} · MAE ${fmtCompact(metrics.MAE, 4)}</div>
           </div>`;
         }).join("")}</div>` : '<div class="empty">暂无训练模型</div>'}

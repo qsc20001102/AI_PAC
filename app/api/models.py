@@ -23,6 +23,7 @@ from app.services.audit import audit
 from app.services.model_training import (
     SUPPORTED_MODEL_KINDS,
     current_model_feature_schema,
+    default_model_feature_schema,
     decode_model_sample_csv_payload,
     import_model_csv_samples,
     normalize_training_config,
@@ -49,10 +50,12 @@ def models() -> dict[str, Any]:
 def create_model_project(payload: ModelProjectCreate) -> dict[str, Any]:
     now = utc_now_iso()
     with db_session() as con:
-        point = con.execute("SELECT id FROM dosing_points WHERE id=?", (payload.dosing_point_id,)).fetchone()
-        if not point:
-            raise HTTPException(422, "训练投加点不存在")
-        schema = current_model_feature_schema(con, payload.dosing_point_id, payload.model_kind)
+        dosing_point_id = payload.dosing_point_id
+        if dosing_point_id is not None:
+            point = con.execute("SELECT id FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
+            if not point:
+                raise HTTPException(422, "训练投加点不存在")
+        schema = current_model_feature_schema(con, dosing_point_id, payload.model_kind) if dosing_point_id is not None else default_model_feature_schema(payload.model_kind)
         training_config = normalize_training_config(payload.training_config, payload.model_kind, schema)
         try:
             cur = con.execute(
@@ -63,7 +66,7 @@ def create_model_project(payload: ModelProjectCreate) -> dict[str, Any]:
                 """,
                 (
                     payload.name.strip(),
-                    payload.dosing_point_id,
+                    dosing_point_id,
                     payload.model_kind,
                     "draft",
                     payload.sample_interval_minutes,
@@ -347,7 +350,7 @@ def model_project_rows(con) -> list[dict[str, Any]]:
             dp.name AS dosing_point_name, dp.code AS dosing_point_code,
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
-        JOIN dosing_points dp ON dp.id=mp.dosing_point_id
+        LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
         WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict')
         ORDER BY mp.updated_at DESC, mp.id DESC
         """
@@ -363,7 +366,7 @@ def model_project_summary_rows(con) -> list[dict[str, Any]]:
             dp.name AS dosing_point_name,
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
-        JOIN dosing_points dp ON dp.id=mp.dosing_point_id
+        LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
         WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict')
         ORDER BY CASE mp.status WHEN 'published' THEN 0 WHEN 'recording' THEN 1 WHEN 'ready' THEN 2 ELSE 3 END,
                  mp.updated_at DESC,mp.id DESC
@@ -399,7 +402,7 @@ def model_project_detail(
         SELECT mp.*, dp.name AS dosing_point_name, dp.code AS dosing_point_code,
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
-        JOIN dosing_points dp ON dp.id=mp.dosing_point_id
+        LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
         WHERE mp.id=?
         """,
         (model_id,),

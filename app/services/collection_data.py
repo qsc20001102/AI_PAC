@@ -81,7 +81,7 @@ def write_ingested_samples(con, samples: list[IngestSampleIn]) -> tuple[int, set
 
 
 def refresh_local_simulated_samples(con, force: bool = False) -> None:
-    """Keep the bundled local demo live without masking the delayed deep-treatment case."""
+    """Write one batch of local simulated samples for manual collector testing."""
     now = datetime.now().replace(second=0, microsecond=0)
     baselines = {
         1: {"Q": 1235.0, "PO4_P": 0.320, "TP_BEFORE": 0.460, "TP_OUT": 0.180, "PH": 7.32, "PAC_ACTUAL": 36.4, "TURBIDITY": 14.0},

@@ -222,11 +222,30 @@ def model_sample_value(value: Any, digits: int = 6) -> float | None:
     return round(number, digits)
 
 
-def current_model_feature_schema(con, dosing_point_id: int, kind: str | None = None) -> list[dict[str, Any]]:
+def default_model_feature_schema(kind: str | None = None) -> list[dict[str, Any]]:
+    kind = kind or MODEL_KIND_TP_OUT_RESPONSE
+    if kind not in SUPPORTED_MODEL_KINDS:
+        raise HTTPException(422, "模型类型不支持")
+    return [
+        {
+            "key": key,
+            "field": field_name,
+            "label": label,
+            "unit": default_unit,
+            "tag_id": None,
+            "tag_code": None,
+        }
+        for key, field_name, label, default_unit in MODEL_INPUT_FEATURES
+    ]
+
+
+def current_model_feature_schema(con, dosing_point_id: int | None = None, kind: str | None = None) -> list[dict[str, Any]]:
+    kind = kind or MODEL_KIND_TP_OUT_RESPONSE
+    if dosing_point_id is None:
+        return default_model_feature_schema(kind)
     point = con.execute("SELECT * FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
     if not point:
         raise HTTPException(404, "投加点不存在")
-    kind = kind or MODEL_KIND_TP_OUT_RESPONSE
     if kind not in SUPPORTED_MODEL_KINDS:
         raise HTTPException(422, "模型类型不支持")
     return model_input_feature_schema(con, point)
@@ -251,7 +270,8 @@ def model_input_feature_schema(con, point) -> list[dict[str, Any]]:
 
 
 def sync_model_feature_schema(con, model) -> list[dict[str, Any]]:
-    schema = current_model_feature_schema(con, int(model["dosing_point_id"]), model_kind(model))
+    dosing_point_id = model_row_value(model, "dosing_point_id")
+    schema = current_model_feature_schema(con, int(dosing_point_id) if dosing_point_id is not None else None, model_kind(model))
     if loads_json(model["feature_schema_json"], []) != schema:
         con.execute(
             "UPDATE model_projects SET feature_schema_json=?,updated_at=? WHERE id=?",
@@ -264,9 +284,12 @@ def record_model_project_sample(con, model) -> dict[str, Any]:
     kind = model_kind(model)
     if kind not in SUPPORTED_MODEL_KINDS:
         raise HTTPException(422, "模型类型不支持")
+    dosing_point_id = model_row_value(model, "dosing_point_id")
+    if dosing_point_id is None:
+        raise HTTPException(422, "模型未绑定投加点，不能实时记录；请导入 CSV 样本")
     now = datetime.now().replace(microsecond=0)
     schema = sync_model_feature_schema(con, model)
-    live_data = latest_data_for_point(con, int(model["dosing_point_id"]), now)
+    live_data = latest_data_for_point(con, int(dosing_point_id), now)
     values: dict[str, float | None] = {}
     for item in schema:
         point = live_data.get(item["key"])

@@ -22,19 +22,19 @@ Get-ChildItem static/js -Recurse -Filter *.js | ForEach-Object { node --check $_
 启动服务：
 
 ```powershell
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+python run_server.py
 ```
 
 访问：
 
 ```text
-http://<本机IP>:8000/
+http://<本机IP>:<系统配置端口>/
 ```
 
 本机调试也可使用：
 
 ```text
-http://127.0.0.1:8000/
+http://127.0.0.1:<系统配置端口>/
 ```
 
 ## 发布前检查清单
@@ -112,16 +112,16 @@ POST /api/models/{model_id}/recording/stop
 
 ## 外部访问排障
 
-服务必须监听所有网卡：
+服务必须监听所有网卡。系统配置端口默认是 8000，可在系统设置页修改，修改后重启生效：
 
 ```powershell
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+python run_server.py
 ```
 
 确认监听：
 
 ```powershell
-Get-NetTCPConnection -LocalPort 8000 -State Listen
+Get-NetTCPConnection -LocalPort <系统配置端口> -State Listen
 ```
 
 期望 `LocalAddress` 为 `0.0.0.0`。
@@ -138,9 +138,9 @@ Get-NetIPAddress -AddressFamily IPv4 |
 
 1. 优先使用 WLAN/以太网地址，不要优先使用 VMware、虚拟网卡或隧道网卡地址。
 2. 确认客户端和服务器在同一网段或路由可达。
-3. 检查 Windows 防火墙是否放行 TCP 8000。
+3. 检查 Windows 防火墙是否放行系统配置的 TCP 端口。
 4. 检查安全软件或网络策略是否阻断入站连接。
-5. 在服务器本机打开 `http://127.0.0.1:8000/api/health` 确认服务本身正常。
+5. 在服务器本机打开 `http://127.0.0.1:<系统配置端口>/api/health` 确认服务本身正常。
 
 ## 数据库维护
 
@@ -279,7 +279,7 @@ Get-ChildItem static/js -Recurse -Filter *.js | ForEach-Object { node --check $_
 
 ```powershell
 python -m compileall -q app tests
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+python run_server.py
 ```
 
 ## 不确定风险记录

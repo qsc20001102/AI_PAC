@@ -10,7 +10,7 @@ from app.api.common import row_to_dict
 from app.database import db_session, utc_now_iso
 from app.schemas import CollectionTagUpdate
 from app.services.plc import parse_s7_address, read_s7_value
-from app.services.plc_devices import plc_client_store
+from app.services.plc_devices import ensure_plc_runtime_client
 from app.services.recommendation import calculate_for_point
 
 
@@ -108,7 +108,6 @@ def poll_collection_rows(con, rows: list[Any], force_history: bool = False) -> d
     affected_points: set[int] = set()
     now = datetime.now().replace(microsecond=0)
     now_iso = now.isoformat()
-    clients = plc_client_store()
     for row in rows:
         tag_id = int(row["id"])
         point_id = int(row["dosing_point_id"]) if row["dosing_point_id"] is not None else None
@@ -119,7 +118,7 @@ def poll_collection_rows(con, rows: list[Any], force_history: bool = False) -> d
             update_collection_quality(con, tag_id, "unknown", None, now_iso, "未配置数据源或数据地址")
             read_failed += 1
             continue
-        client = clients.get(device_id)
+        client = ensure_plc_runtime_client(con, device_id)
         if client is None:
             update_collection_quality(con, tag_id, "bad", None, now_iso, "PLC 设备未连接")
             read_failed += 1
