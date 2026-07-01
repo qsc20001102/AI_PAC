@@ -16,7 +16,6 @@ from app.services.model_training import (
     monotone_constraints_for_features,
     normalize_training_config,
     parse_model_csv_sample_time,
-    record_model_project_sample,
     train_model_project_artifact,
 )
 from app.services import collection_runtime, plc_devices
@@ -286,7 +285,6 @@ class RecommendationFormulaTests(unittest.TestCase):
                 "num_boost_round": 30,
                 "early_stopping_rounds": 5,
                 "monotone_constraints": {"Q": -1},
-                "sample_weight_rule": "high_target",
             },
             "pac_flow_predict",
             schema,
@@ -323,52 +321,19 @@ class RecommendationFormulaTests(unittest.TestCase):
         self.assertEqual(trained["artifact"]["training_config"]["num_boost_round"], 30)
         self.assertEqual(trained["artifact"]["lightgbm_params"]["monotone_constraints"], [-1])
 
-    def test_training_config_allows_zero_prediction_step(self):
+    def test_training_config_drops_removed_model_params(self):
         schema = [{"key": "Q", "label": "参考流量", "tag_code": "Q"}]
         config = normalize_training_config(
-            {"feature_columns": ["Q"], "prediction_step": 0},
+            {
+                "feature_columns": ["Q"],
+                "prediction_step": 2,
+                "sample_weight_rule": "high_target",
+            },
             "tp_out_response",
             schema,
         )
-        self.assertEqual(config["prediction_step"], 0)
-
-    def test_realtime_record_writes_current_tp_target_when_step_zero(self):
-        con = self.memory_db()
-        schema = current_model_feature_schema(con, 1, "tp_out_response")
-        training_config = normalize_training_config(
-            {"feature_columns": [item["key"] for item in schema], "prediction_step": 0},
-            "tp_out_response",
-            schema,
-        )
-        cur = con.execute(
-            """
-            INSERT INTO model_projects(name,dosing_point_id,model_kind,status,sample_interval_minutes,feature_schema_json,training_config_json,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                "tp-record-step-zero",
-                1,
-                "tp_out_response",
-                "draft",
-                5,
-                dumps_json(schema),
-                dumps_json(training_config),
-                "2026-06-26T10:00:00",
-                "2026-06-26T10:00:00",
-            ),
-        )
-        model = con.execute("SELECT * FROM model_projects WHERE id=?", (cur.lastrowid,)).fetchone()
-        result = record_model_project_sample(con, model)
-        self.assertIsNotNone(result["sample_id"])
-        sample = con.execute(
-            "SELECT * FROM model_training_samples WHERE id=?",
-            (result["sample_id"],),
-        ).fetchone()
-        values = loads_json(sample["values_json"], {})
-        self.assertIn("_training_target_tp_out_next", values)
-        columns = {row["name"] for row in con.execute("PRAGMA table_info(model_training_samples)").fetchall()}
-        target_column = "target_value" if "target_value" in columns else "k_ai"
-        self.assertIsNotNone(sample[target_column])
+        self.assertNotIn("prediction_step", config)
+        self.assertNotIn("sample_weight_rule", config)
 
     def test_plc_device_rows_do_not_report_connected_without_runtime_client(self):
         con = self.memory_db()

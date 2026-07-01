@@ -125,6 +125,8 @@ function defaultCurve() {
   return [{ tp_mg_l: 0, dose_mg_l: 0 }, { tp_mg_l: 0.3, dose_mg_l: 30 }, { tp_mg_l: 0.5, dose_mg_l: 60 }, { tp_mg_l: 1, dose_mg_l: 100 }];
 }
 
+let activeCurveDragBounds = null;
+
 function normalizeCurve(curve) {
   const points = (Array.isArray(curve) && curve.length >= 2 ? curve : defaultCurve())
     .map((point) => ({
@@ -226,6 +228,22 @@ function curvePointToSvg(point, bounds) {
   };
 }
 
+function clientPointToSvg(svg, event) {
+  const matrix = svg.getScreenCTM();
+  if (matrix && typeof svg.createSVGPoint === "function") {
+    const point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    const transformed = point.matrixTransform(matrix.inverse());
+    return { x: transformed.x, y: transformed.y };
+  }
+  const rect = svg.getBoundingClientRect();
+  return {
+    x: ((event.clientX - rect.left) / rect.width) * 760,
+    y: ((event.clientY - rect.top) / rect.height) * 320,
+  };
+}
+
 function svgToCurvePoint(x, y, bounds) {
   const plotWidth = bounds.width - bounds.left - bounds.right;
   const plotHeight = bounds.height - bounds.top - bounds.bottom;
@@ -242,7 +260,7 @@ function renderUnitDoseCurve() {
   if (!svg) return;
   const points = curveEditorPoints();
   const selectedIndex = selectedCurvePointIndex();
-  const bounds = curveChartBounds(points);
+  const bounds = activeCurveDragBounds || curveChartBounds(points);
   const svgPoints = points.map((point) => curvePointToSvg(point, bounds));
   const xTicks = [0, bounds.maxX / 2, bounds.maxX];
   const yTicks = [0, bounds.maxY / 2, bounds.maxY];
@@ -325,9 +343,7 @@ function addCurvePointFromSvg(event) {
   if (event.target.closest("[data-curve-point]")) return;
   const svg = document.getElementById("unitDoseCurveSvg");
   if (!svg) return;
-  const rect = svg.getBoundingClientRect();
-  const x = ((event.clientX - rect.left) / rect.width) * 760;
-  const y = ((event.clientY - rect.top) / rect.height) * 320;
+  const { x, y } = clientPointToSvg(svg, event);
   const points = curveEditorPoints();
   const newPoint = svgToCurvePoint(x, y, curveChartBounds(points));
   const sorted = sortedUniqueCurve([...points, newPoint]);
@@ -351,21 +367,23 @@ function startCurvePointDrag(event) {
   const svg = document.getElementById("unitDoseCurveSvg");
   if (!svg) return;
   const index = Number(event.currentTarget.dataset.curvePoint);
+  const dragBounds = curveChartBounds(curveEditorPoints());
+  activeCurveDragBounds = dragBounds;
   setSelectedCurvePoint(index);
   const move = (moveEvent) => {
-    const rect = svg.getBoundingClientRect();
-    const x = ((moveEvent.clientX - rect.left) / rect.width) * 760;
-    const y = ((moveEvent.clientY - rect.top) / rect.height) * 320;
-    const points = curveEditorPoints();
-    const bounds = curveChartBounds(points);
-    updateSelectedCurvePoint(svgToCurvePoint(x, y, bounds));
+    const { x, y } = clientPointToSvg(svg, moveEvent);
+    updateSelectedCurvePoint(svgToCurvePoint(x, y, dragBounds));
   };
-  const up = () => {
+  const finish = () => {
+    activeCurveDragBounds = null;
     window.removeEventListener("pointermove", move);
-    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    renderUnitDoseCurve();
   };
   window.addEventListener("pointermove", move);
-  window.addEventListener("pointerup", up);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
 }
 
 function wireUnitDoseCurveEditor() {

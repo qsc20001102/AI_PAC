@@ -609,6 +609,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             "training_config_json": "TEXT NOT NULL DEFAULT '{}'",
         },
     )
+    sanitize_model_training_configs(con)
     # Recording is runtime activity, not a model lifecycle state. Restore models
     # that were previously published before recording was started.
     con.execute(
@@ -625,6 +626,23 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
     backfill_in_ph_source_tags(con)
     backfill_parameter_groups(con)
     backfill_point_model_selections(con)
+
+
+def sanitize_model_training_configs(con: sqlite3.Connection) -> None:
+    removed_keys = {"prediction_step", "sample_weight_rule"}
+    rows = con.execute("SELECT id, training_config_json FROM model_projects").fetchall()
+    for row in rows:
+        try:
+            config = loads_json(row["training_config_json"], {})
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(config, dict) or not any(key in config for key in removed_keys):
+            continue
+        cleaned = {key: value for key, value in config.items() if key not in removed_keys}
+        con.execute(
+            "UPDATE model_projects SET training_config_json=? WHERE id=?",
+            (dumps_json(cleaned), row["id"]),
+        )
 
 
 def ensure_model_projects_nullable_dosing_point(con: sqlite3.Connection) -> None:

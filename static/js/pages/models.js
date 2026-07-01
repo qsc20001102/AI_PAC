@@ -169,7 +169,6 @@ function renderModelTrainingConfig(model, columns) {
           </div>
         </div>
         <div class="model-param-grid">
-          ${modelNumberField("prediction_step", config.prediction_step, 0, 24, "1", model)}
           ${modelNumberField("valid_ratio", config.valid_ratio, 0.05, 0.5, "0.01", model)}
           ${modelSelectField("split_method", [
             { value: "time", label: "time" },
@@ -190,10 +189,6 @@ function renderModelTrainingConfig(model, columns) {
           ${modelNumberField("feature_fraction", config.feature_fraction, 0.1, 1, "0.01", model)}
           ${modelNumberField("bagging_fraction", config.bagging_fraction, 0.1, 1, "0.01", model)}
           ${modelNumberField("bagging_freq", config.bagging_freq, 0, 100, "1", model)}
-          ${modelSelectField("sample_weight_rule", [
-            { value: "none", label: "none" },
-            { value: "high_target", label: "high_target" },
-          ], config.sample_weight_rule, model)}
         </div>
         <div class="model-feature-config">
           <div class="model-config-subtitle model-help" data-help="${modelHelpAttr("monotone_constraints", model)}">monotone_constraints</div>
@@ -246,7 +241,6 @@ function modelParamHelp(name, model) {
   const helps = {
     target_column: `作用：预测目标列\\A建议默认值：${targetDefault}\\A调整建议：不同模型类型必须对应不同目标列，页面会按模型类型自动固定。`,
     feature_columns: `作用：输入字段\\A建议默认值：${featureDefault}\\A调整建议：不同数据表字段变化时调整；至少保留 1 个有变化的数值字段。`,
-    prediction_step: "作用：预测步长\\A建议默认值：1\\A调整建议：填 0 表示直接预测当前条数据；2小时数据预测下一次检测就填 1。",
     valid_ratio: "作用：验证集比例\\A建议默认值：0.2\\A调整建议：数据少用 0.2，数据多可调到 0.15。",
     split_method: "作用：划分方式\\A建议默认值：time\\A调整建议：工业时序数据必须按时间切分；只在明确要随机抽样验证时用 random。",
     objective: "作用：损失函数\\A建议默认值：huber\\A调整建议：异常点多用 huber，数据平稳可用 regression_l2。",
@@ -261,7 +255,6 @@ function modelParamHelp(name, model) {
     bagging_fraction: "作用：每轮使用多少样本\\A建议默认值：0.85~0.9，当前默认 0.85\\A调整建议：数据多时可用，数据少不要太低。",
     bagging_freq: "作用：bagging 频率\\A建议默认值：1\\A调整建议：一般固定 1；设为 0 表示关闭 bagging。",
     monotone_constraints: "作用：单调约束\\A建议默认值：按字段配置，普通字段为 0\\A调整建议：PAC、加药单耗等字段可设 -1，表示该字段越大预测TP只能下降或不变。",
-    sample_weight_rule: "作用：样本权重规则\\A建议默认值：none\\A调整建议：高TP样本少时可选 high_target，提高高目标值样本权重。",
   };
   return (helps[name] || "").replaceAll("\\A", "\n");
 }
@@ -279,7 +272,6 @@ function modelTrainingConfig(model, columns) {
   return {
     target_column: modelTrainingTargetKey(model),
     feature_columns: featureColumns.length ? featureColumns : keys,
-    prediction_step: raw.prediction_step ?? 1,
     valid_ratio: raw.valid_ratio ?? 0.2,
     split_method: raw.split_method || "time",
     objective: raw.objective || "huber",
@@ -294,7 +286,6 @@ function modelTrainingConfig(model, columns) {
     bagging_fraction: raw.bagging_fraction ?? 0.85,
     bagging_freq: raw.bagging_freq ?? 1,
     monotone_constraints: constraints,
-    sample_weight_rule: raw.sample_weight_rule || "none",
   };
 }
 
@@ -310,7 +301,6 @@ function modelProjectPayload(form, model, columns) {
   payload.training_config = {
     target_column: modelTrainingTargetKey(model),
     feature_columns: featureColumns,
-    prediction_step: Number(payload.prediction_step),
     valid_ratio: Number(payload.valid_ratio),
     split_method: payload.split_method,
     objective: payload.objective,
@@ -325,12 +315,10 @@ function modelProjectPayload(form, model, columns) {
     bagging_fraction: Number(payload.bagging_fraction),
     bagging_freq: Number(payload.bagging_freq),
     monotone_constraints: monotoneConstraints,
-    sample_weight_rule: payload.sample_weight_rule,
   };
   [
     "target_column",
     "feature_columns",
-    "prediction_step",
     "valid_ratio",
     "split_method",
     "objective",
@@ -345,7 +333,6 @@ function modelProjectPayload(form, model, columns) {
     "bagging_fraction",
     "bagging_freq",
     "monotone_constraints",
-    "sample_weight_rule",
   ].forEach((key) => { delete payload[key]; });
   return payload;
 }

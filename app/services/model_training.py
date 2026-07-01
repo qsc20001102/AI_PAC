@@ -68,7 +68,6 @@ MODEL_INPUT_FEATURES = [
 ]
 SPLIT_METHODS = {"time", "random"}
 OBJECTIVES = {"huber", "regression_l2", "regression_l1"}
-SAMPLE_WEIGHT_RULES = {"none", "high_target"}
 
 
 def model_row_value(model, key: str, default: Any = None) -> Any:
@@ -87,7 +86,6 @@ def default_training_config(kind: str, schema: list[dict[str, Any]]) -> dict[str
     return {
         "target_column": target_key,
         "feature_columns": feature_columns,
-        "prediction_step": 1,
         "valid_ratio": 0.2,
         "split_method": "time",
         "objective": "huber",
@@ -102,7 +100,6 @@ def default_training_config(kind: str, schema: list[dict[str, Any]]) -> dict[str
         "bagging_fraction": 0.85,
         "bagging_freq": 1,
         "monotone_constraints": {key: 0 for key in feature_columns},
-        "sample_weight_rule": "none",
     }
 
 
@@ -156,11 +153,9 @@ def normalize_training_config(raw: Any, kind: str, schema: list[dict[str, Any]])
 
     split_method = str(raw.get("split_method", base["split_method"]))
     objective = str(raw.get("objective", base["objective"]))
-    sample_weight_rule = str(raw.get("sample_weight_rule", base["sample_weight_rule"]))
     return {
         "target_column": target_definition_for_kind(kind)[1],
         "feature_columns": feature_columns,
-        "prediction_step": _config_int(raw.get("prediction_step"), base["prediction_step"], 0, 24),
         "valid_ratio": _config_float(raw.get("valid_ratio"), base["valid_ratio"], 0.05, 0.5),
         "split_method": split_method if split_method in SPLIT_METHODS else base["split_method"],
         "objective": objective if objective in OBJECTIVES else base["objective"],
@@ -175,7 +170,6 @@ def normalize_training_config(raw: Any, kind: str, schema: list[dict[str, Any]])
         "bagging_fraction": _config_float(raw.get("bagging_fraction"), base["bagging_fraction"], 0.1, 1.0),
         "bagging_freq": _config_int(raw.get("bagging_freq"), base["bagging_freq"], 0, 100),
         "monotone_constraints": constraints,
-        "sample_weight_rule": sample_weight_rule if sample_weight_rule in SAMPLE_WEIGHT_RULES else base["sample_weight_rule"],
     }
 
 
@@ -497,8 +491,7 @@ def build_regression_booster(con, model, target_key: str) -> dict[str, Any]:
     feature_keys, feature_labels = regression_feature_columns(training_schema, usable_samples)
     matrix = regression_matrix(feature_keys, usable_samples)
     target = np.array([target_value for _, target_value in usable_samples], dtype=float)
-    sample_weight = regression_sample_weight(target, training_config["sample_weight_rule"])
-    booster, metrics, lightgbm_params = train_lgb_regression(matrix, target, feature_keys, training_config, sample_weight)
+    booster, metrics, lightgbm_params = train_lgb_regression(matrix, target, feature_keys, training_config)
     metrics.update({"samples": len(usable_samples), "feature_count": len(feature_keys)})
     return {
         "booster": booster,
@@ -549,15 +542,6 @@ def configured_monotone_constraints(feature_keys: list[str], training_config: di
     return values
 
 
-def regression_sample_weight(target: np.ndarray, rule: str) -> np.ndarray | None:
-    if rule != "high_target" or len(target) < 4:
-        return None
-    threshold = float(np.quantile(target, 0.75))
-    weights = np.ones(len(target), dtype=float)
-    weights[target >= threshold] = 2.0
-    return weights
-
-
 def train_valid_split_indices(size: int, training_config: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     valid_size = max(1, int(round(size * float(training_config["valid_ratio"]))))
     valid_size = min(valid_size, size - 1)
@@ -576,16 +560,13 @@ def train_lgb_regression(
     target: np.ndarray,
     feature_keys: list[str],
     training_config: dict[str, Any],
-    sample_weight: np.ndarray | None,
 ) -> tuple[lgb.Booster, dict[str, Any], dict[str, Any]]:
     train_indices, valid_indices = train_valid_split_indices(len(target), training_config)
     train_matrix, train_target = matrix[train_indices], target[train_indices]
     valid_matrix, valid_target = matrix[valid_indices], target[valid_indices]
-    train_weight = sample_weight[train_indices] if sample_weight is not None else None
-    valid_weight = sample_weight[valid_indices] if sample_weight is not None else None
     feature_names = [f"f{i}" for i in range(matrix.shape[1])] if matrix.shape[1] else None
-    train_dataset = lgb.Dataset(train_matrix, label=train_target, weight=train_weight, feature_name=feature_names, free_raw_data=False)
-    valid_dataset = lgb.Dataset(valid_matrix, label=valid_target, weight=valid_weight, reference=train_dataset, feature_name=feature_names, free_raw_data=False)
+    train_dataset = lgb.Dataset(train_matrix, label=train_target, feature_name=feature_names, free_raw_data=False)
+    valid_dataset = lgb.Dataset(valid_matrix, label=valid_target, reference=train_dataset, feature_name=feature_names, free_raw_data=False)
     params = {
         "objective": training_config["objective"],
         "metric": ["l1", "l2"],
