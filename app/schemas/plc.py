@@ -12,6 +12,8 @@ class PlcDeviceCreate(BaseModel):
     rack: int = Field(default=0, ge=0, le=32)
     slot: int = Field(default=0, ge=0, le=32)
     enabled: bool = True
+    reconnect_enabled: bool = False
+    reconnect_interval_seconds: int = Field(default=10, ge=1, le=3600)
 
 
 class PlcDeviceUpdate(BaseModel):
@@ -23,3 +25,5 @@ class PlcDeviceUpdate(BaseModel):
     rack: int = Field(default=0, ge=0, le=32)
     slot: int = Field(default=0, ge=0, le=32)
     enabled: bool = True
+    reconnect_enabled: bool = False
+    reconnect_interval_seconds: int = Field(default=10, ge=1, le=3600)

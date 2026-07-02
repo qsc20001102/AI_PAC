@@ -489,6 +489,14 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
     con.execute(
         "UPDATE model_projects SET status='archived', recording_enabled=0 WHERE model_kind='dose_predict'"
     )
+    ensure_columns(
+        con,
+        "plc_devices",
+        {
+            "reconnect_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "reconnect_interval_seconds": "INTEGER NOT NULL DEFAULT 10",
+        },
+    )
     backfill_process_source_tags(con)
     ensure_learning_source_tags(con)
     backfill_in_ph_source_tags(con)

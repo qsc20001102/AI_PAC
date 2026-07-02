@@ -47,6 +47,8 @@ function plcDevicePayload(form) {
   payload.rack = Number(payload.rack || 0);
   payload.slot = Number(payload.slot || 0);
   payload.enabled = payload.enabled === true || payload.enabled === "true";
+  payload.reconnect_enabled = payload.reconnect_enabled === true || payload.reconnect_enabled === "true";
+  payload.reconnect_interval_seconds = Number(payload.reconnect_interval_seconds || 10);
   return payload;
 }
 
@@ -94,6 +96,8 @@ async function renderPlc(main) {
               ${field("rack", "Rack", device.rack ?? 0)}
               ${field("slot", "Slot", device.slot ?? 0)}
               ${selectField("enabled", "启用状态", [{ value: "true", label: "启用" }, { value: "false", label: "停用" }], String(Boolean(device.enabled)))}
+              ${selectField("reconnect_enabled", "断线重连", [{ value: "true", label: "开启" }, { value: "false", label: "关闭" }], String(Boolean(device.reconnect_enabled)))}
+              ${field("reconnect_interval_seconds", "重连间隔 (秒)", device.reconnect_interval_seconds ?? 10)}
             </div>
             <div class="kv" style="margin-top:16px">
               <div class="kv-label">连接状态</div><div><span class="status-tag status-${plcStatusClass(device.status)}">${plcStatusLabel(device.status)}</span></div>

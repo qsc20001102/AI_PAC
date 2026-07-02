@@ -53,8 +53,10 @@ def create_plc_device(payload: PlcDeviceCreate) -> dict[str, Any]:
             """
             INSERT INTO plc_devices(
                 name,protocol,ip_address,port,timeout_ms,rack,slot,pdu_length,status,
-                last_connected_at,last_disconnected_at,last_error,enabled,created_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                last_connected_at,last_disconnected_at,last_error,enabled,
+                reconnect_enabled,reconnect_interval_seconds,
+                created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 payload.name.strip(),
@@ -70,6 +72,8 @@ def create_plc_device(payload: PlcDeviceCreate) -> dict[str, Any]:
                 None,
                 "pending connection",
                 int(payload.enabled),
+                int(payload.reconnect_enabled),
+                payload.reconnect_interval_seconds,
                 now,
                 now,
             ),
@@ -96,7 +100,9 @@ def update_plc_device(device_id: int, payload: PlcDeviceUpdate) -> dict[str, Any
             """
             UPDATE plc_devices
             SET name=?, protocol=?, ip_address=?, port=?, timeout_ms=?, rack=?, slot=?,
-                status='disconnected', last_disconnected_at=?, last_error=NULL, enabled=?, updated_at=?
+                status='disconnected', last_disconnected_at=?, last_error=NULL, enabled=?,
+                reconnect_enabled=?, reconnect_interval_seconds=?,
+                updated_at=?
             WHERE id=?
             """,
             (
@@ -109,6 +115,8 @@ def update_plc_device(device_id: int, payload: PlcDeviceUpdate) -> dict[str, Any
                 payload.slot,
                 now,
                 int(payload.enabled),
+                int(payload.reconnect_enabled),
+                payload.reconnect_interval_seconds,
                 now,
                 device_id,
             ),

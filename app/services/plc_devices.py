@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import HTTPException
@@ -11,6 +12,7 @@ from app.services.plc import connect_s7_1500, disconnect_client
 
 
 _plc_clients: dict[int, Any] = {}
+_last_reconnect_attempt: dict[int, float] = {}
 
 
 def plc_client_store() -> dict[int, Any]:
@@ -53,10 +55,21 @@ def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
         return None
 
     device = con.execute("SELECT * FROM plc_devices WHERE id=?", (device_id,)).fetchone()
-    if not device or not bool(device["enabled"]) or device["status"] != "connected":
+    if not device or not bool(device["enabled"]) or device["protocol"] != "s7_1500":
         return None
-    if device["protocol"] != "s7_1500":
+
+    # 判断是否应该尝试连接
+    should_try = device["status"] == "connected"
+    if not should_try and bool(device["reconnect_enabled"]):
+        last_attempt = _last_reconnect_attempt.get(device_id, 0)
+        interval = int(device["reconnect_interval_seconds"])
+        if time.monotonic() - last_attempt >= interval:
+            should_try = True
+
+    if not should_try:
         return None
+
+    _last_reconnect_attempt[device_id] = time.monotonic()
 
     result = connect_s7_1500(
         ip_address=device["ip_address"],
@@ -68,6 +81,7 @@ def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
     now = utc_now_iso()
     if result.ok and result.client is not None:
         clients[device_id] = result.client
+        _last_reconnect_attempt.pop(device_id, None)
         con.execute(
             """
             UPDATE plc_devices
@@ -76,7 +90,7 @@ def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
             """,
             (result.pdu_length, now, now, device_id),
         )
-        log_plc_device_event(con, device_id, "reconnect", "connected", "采集轮询自动恢复 PLC 连接", result.pdu_length)
+        log_plc_device_event(con, device_id, "reconnect", "connected", "断线重连成功，PLC 连接已恢复", result.pdu_length)
         return result.client
 
     con.execute(
