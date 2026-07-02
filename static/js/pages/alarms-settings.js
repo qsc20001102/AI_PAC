@@ -81,6 +81,17 @@ async function renderSettings(main) {
         </table>
       </div>
     </section>
+    <section class="panel" id="passwordPanel">
+      <div class="panel-header"><div class="panel-title">修改密码</div></div>
+      <div class="panel-body">
+        <form id="passwordForm" class="form">
+          <div class="field"><label>旧密码</label><input type="password" id="oldPassword" required></div>
+          <div class="field"><label>新密码</label><input type="password" id="newPassword" required minlength="6"></div>
+          <div class="field"><label>确认新密码</label><input type="password" id="confirmPassword" required minlength="6"></div>
+          <div class="actions"><button class="btn primary" type="submit">修改密码</button></div>
+        </form>
+      </div>
+    </section>
   `;
   updateNetworkPreview(network);
   document.getElementById("backupBtn").addEventListener("click", async () => {
@@ -96,6 +107,31 @@ async function renderSettings(main) {
     showToast("设置已保存");
     await renderPage();
   }));
+  document.getElementById("passwordForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const oldPassword = document.getElementById("oldPassword").value;
+    const newPassword = document.getElementById("newPassword").value;
+    const confirmPassword = document.getElementById("confirmPassword").value;
+    if (newPassword !== confirmPassword) {
+      showToast("两次输入的新密码不一致");
+      return;
+    }
+    try {
+      const res = await api("/api/auth/password", { method: "PUT", body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }) });
+      if (res.ok) {
+        showToast("密码修改成功，请重新登录");
+        localStorage.removeItem("token");
+        state.user = null;
+        renderUserArea();
+        renderNav();
+        await renderPage();
+      } else {
+        showToast(res.detail || "密码修改失败");
+      }
+    } catch (err) {
+      showToast(`密码修改失败：${err.message}`);
+    }
+  });
 }
 
 function renderSettingRow(s) {

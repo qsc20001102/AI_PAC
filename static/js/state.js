@@ -1,5 +1,6 @@
 ﻿const state = {
   activePage: "overview",
+  user: null,
   dashboard: null,
   points: [],
   selectedPointId: 1,

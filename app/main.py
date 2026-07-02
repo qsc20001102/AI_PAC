@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.alarms import router as alarms_router
+from app.api.auth import router as auth_router
 from app.api.collection import router as collection_router
 from app.api.dashboard import router as dashboard_router
 from app.api.dosing_points import router as dosing_points_router
@@ -29,6 +30,7 @@ from app.services.plc import disconnect_client
 from app.services.plc_devices import auto_connect_enabled_plc_devices, plc_client_store
 from app.api.dosing_points import ensure_virtual_point_tags
 from app.services.recommendation import recalculate_all
+from app.services.auth import ensure_default_users
 from app.services.seed import ensure_seed_data
 from app.services.settings_config import get_plc_auto_connect_enabled
 
@@ -43,6 +45,7 @@ app = FastAPI(
 )
 
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(alarms_router)
 app.include_router(process_groups_router)
 app.include_router(settings_router)
@@ -58,6 +61,7 @@ app.include_router(trends_router)
 @app.on_event("startup")
 def startup() -> None:
     init_schema()
+    ensure_default_users()
     plc_client_store().clear()
     with db_session() as con:
         ensure_seed_data(con)
