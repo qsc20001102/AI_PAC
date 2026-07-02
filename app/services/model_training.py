@@ -68,6 +68,8 @@ MODEL_INPUT_FEATURES = [
 ]
 SPLIT_METHODS = {"time", "random"}
 OBJECTIVES = {"huber", "regression_l2", "regression_l1"}
+METRICS = {"rmse", "mae", "mse", "l1", "l2", "huber"}
+BOOSTING_TYPES = {"gbdt", "dart", "rf"}
 
 
 def model_row_value(model, key: str, default: Any = None) -> Any:
@@ -89,17 +91,36 @@ def default_training_config(kind: str, schema: list[dict[str, Any]]) -> dict[str
         "valid_ratio": 0.2,
         "split_method": "time",
         "objective": "huber",
-        "learning_rate": 0.03,
-        "num_boost_round": 500,
+        "metric": ["rmse"],
+        "boosting_type": "gbdt",
+        "learning_rate": 0.05,
+        "num_boost_round": 300,
         "early_stopping_rounds": 50,
-        "num_leaves": 7,
-        "max_depth": 3,
+        "num_leaves": 15,
+        "max_depth": 4,
         "min_data_in_leaf": 20,
-        "lambda_l2": 3.0,
-        "feature_fraction": 1.0,
-        "bagging_fraction": 0.85,
+        "min_sum_hessian_in_leaf": 0.001,
+        "max_delta_step": 0,
+        "max_bin": 255,
+        "min_data_in_bin": 3,
+        "bin_construct_sample_cnt": 200000,
+        "lambda_l1": 0.3,
+        "lambda_l2": 20.0,
+        "min_gain_to_split": 0.02,
+        "path_smooth": 0,
+        "linear_lambda": 0,
+        "feature_fraction": 0.9,
+        "feature_fraction_bynode": 1.0,
+        "bagging_fraction": 0.9,
         "bagging_freq": 1,
+        "extra_trees": False,
         "monotone_constraints": {key: 0 for key in feature_columns},
+        "seed": 42,
+        "feature_fraction_seed": 42,
+        "bagging_seed": 42,
+        "data_random_seed": 42,
+        "extra_seed": 42,
+        "deterministic": True,
     }
 
 
@@ -153,23 +174,51 @@ def normalize_training_config(raw: Any, kind: str, schema: list[dict[str, Any]])
 
     split_method = str(raw.get("split_method", base["split_method"]))
     objective = str(raw.get("objective", base["objective"]))
+    raw_metric = raw.get("metric", base["metric"])
+    if isinstance(raw_metric, list):
+        metric = [str(m) for m in raw_metric if str(m) in METRICS]
+    else:
+        metric = [str(raw_metric)] if str(raw_metric) in METRICS else base["metric"]
+    if not metric:
+        metric = base["metric"]
+    boosting_type = str(raw.get("boosting_type", base["boosting_type"]))
+
     return {
         "target_column": target_definition_for_kind(kind)[1],
         "feature_columns": feature_columns,
         "valid_ratio": _config_float(raw.get("valid_ratio"), base["valid_ratio"], 0.05, 0.5),
         "split_method": split_method if split_method in SPLIT_METHODS else base["split_method"],
         "objective": objective if objective in OBJECTIVES else base["objective"],
+        "metric": metric,
+        "boosting_type": boosting_type if boosting_type in BOOSTING_TYPES else base["boosting_type"],
         "learning_rate": _config_float(raw.get("learning_rate"), base["learning_rate"], 0.001, 1.0),
         "num_boost_round": _config_int(raw.get("num_boost_round"), base["num_boost_round"], 10, 2000),
         "early_stopping_rounds": _config_int(raw.get("early_stopping_rounds"), base["early_stopping_rounds"], 0, 300),
         "num_leaves": _config_int(raw.get("num_leaves"), base["num_leaves"], 2, 255),
         "max_depth": _config_int(raw.get("max_depth"), base["max_depth"], -1, 32),
         "min_data_in_leaf": _config_int(raw.get("min_data_in_leaf"), base["min_data_in_leaf"], 1, 10000),
+        "min_sum_hessian_in_leaf": _config_float(raw.get("min_sum_hessian_in_leaf"), base["min_sum_hessian_in_leaf"], 0.0, 10.0),
+        "max_delta_step": _config_float(raw.get("max_delta_step"), base["max_delta_step"], 0.0, 100.0),
+        "max_bin": _config_int(raw.get("max_bin"), base["max_bin"], 2, 255),
+        "min_data_in_bin": _config_int(raw.get("min_data_in_bin"), base["min_data_in_bin"], 1, 100),
+        "bin_construct_sample_cnt": _config_int(raw.get("bin_construct_sample_cnt"), base["bin_construct_sample_cnt"], 100, 1_000_000),
+        "lambda_l1": _config_float(raw.get("lambda_l1"), base["lambda_l1"], 0.0, 1000.0),
         "lambda_l2": _config_float(raw.get("lambda_l2"), base["lambda_l2"], 0.0, 1000.0),
+        "min_gain_to_split": _config_float(raw.get("min_gain_to_split"), base["min_gain_to_split"], 0.0, 10.0),
+        "path_smooth": _config_float(raw.get("path_smooth"), base["path_smooth"], 0.0, 100.0),
+        "linear_lambda": _config_float(raw.get("linear_lambda"), base["linear_lambda"], 0.0, 1000.0),
         "feature_fraction": _config_float(raw.get("feature_fraction"), base["feature_fraction"], 0.1, 1.0),
+        "feature_fraction_bynode": _config_float(raw.get("feature_fraction_bynode"), base["feature_fraction_bynode"], 0.1, 1.0),
         "bagging_fraction": _config_float(raw.get("bagging_fraction"), base["bagging_fraction"], 0.1, 1.0),
         "bagging_freq": _config_int(raw.get("bagging_freq"), base["bagging_freq"], 0, 100),
+        "extra_trees": bool(raw.get("extra_trees", base["extra_trees"])),
         "monotone_constraints": constraints,
+        "seed": _config_int(raw.get("seed"), base["seed"], 0, 999999),
+        "feature_fraction_seed": _config_int(raw.get("feature_fraction_seed"), base["feature_fraction_seed"], 0, 999999),
+        "bagging_seed": _config_int(raw.get("bagging_seed"), base["bagging_seed"], 0, 999999),
+        "data_random_seed": _config_int(raw.get("data_random_seed"), base["data_random_seed"], 0, 999999),
+        "extra_seed": _config_int(raw.get("extra_seed"), base["extra_seed"], 0, 999999),
+        "deterministic": bool(raw.get("deterministic", base["deterministic"])),
     }
 
 
@@ -566,25 +615,47 @@ def train_lgb_regression(
     feature_names = [f"f{i}" for i in range(matrix.shape[1])] if matrix.shape[1] else None
     train_dataset = lgb.Dataset(train_matrix, label=train_target, feature_name=feature_names, free_raw_data=False)
     valid_dataset = lgb.Dataset(valid_matrix, label=valid_target, reference=train_dataset, feature_name=feature_names, free_raw_data=False)
+    # metric 转换为 LightGBM 支持的列表
+    metric_raw = training_config.get("metric", "rmse")
+    metric_list: list[str]
+    if isinstance(metric_raw, list):
+        metric_list = [str(m) for m in metric_raw]
+    else:
+        metric_list = [str(metric_raw)]
+
     params = {
         "objective": training_config["objective"],
-        "metric": ["l1", "l2"],
+        "metric": metric_list,
+        "boosting": training_config["boosting_type"],
         "learning_rate": training_config["learning_rate"],
         "num_leaves": training_config["num_leaves"],
         "max_depth": training_config["max_depth"],
         "min_data_in_leaf": training_config["min_data_in_leaf"],
-        "min_data_in_bin": 3,
+        "min_sum_hessian_in_leaf": training_config["min_sum_hessian_in_leaf"],
+        "max_delta_step": training_config["max_delta_step"],
+        "max_bin": training_config["max_bin"],
+        "min_data_in_bin": training_config["min_data_in_bin"],
+        "bin_construct_sample_cnt": training_config["bin_construct_sample_cnt"],
         "feature_pre_filter": False,
         "monotone_constraints": configured_monotone_constraints(feature_keys, training_config),
         "monotone_constraints_method": "advanced",
-        "lambda_l1": 0.01,
+        "lambda_l1": training_config["lambda_l1"],
         "lambda_l2": training_config["lambda_l2"],
-        "min_gain_to_split": 0.0005,
+        "min_gain_to_split": training_config["min_gain_to_split"],
+        "path_smooth": training_config["path_smooth"],
+        "linear_lambda": training_config["linear_lambda"],
         "feature_fraction": training_config["feature_fraction"],
+        "feature_fraction_bynode": training_config["feature_fraction_bynode"],
         "bagging_fraction": training_config["bagging_fraction"],
         "bagging_freq": training_config["bagging_freq"],
+        "extra_trees": training_config["extra_trees"],
         "verbosity": -1,
-        "seed": 20260630,
+        "seed": training_config["seed"],
+        "feature_fraction_seed": training_config["feature_fraction_seed"],
+        "bagging_seed": training_config["bagging_seed"],
+        "data_random_seed": training_config["data_random_seed"],
+        "extra_seed": training_config["extra_seed"],
+        "deterministic": training_config["deterministic"],
     }
     callbacks = [lgb.log_evaluation(50)]
     if training_config["early_stopping_rounds"] > 0:

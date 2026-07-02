@@ -1,3 +1,36 @@
+function initModelHelpTooltips(container) {
+  let tooltip = document.getElementById("modelGlobalTooltip");
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.id = "modelGlobalTooltip";
+    document.body.appendChild(tooltip);
+  }
+  container.querySelectorAll(".model-help").forEach((el) => {
+    el.addEventListener("mouseenter", () => {
+      const text = el.getAttribute("data-help");
+      if (!text) return;
+      tooltip.textContent = text;
+      tooltip.style.opacity = "0";
+      tooltip.style.left = "-9999px";
+      tooltip.style.top = "-9999px";
+      const rect = el.getBoundingClientRect();
+      const th = tooltip.offsetHeight || 60;
+      const spaceAbove = rect.top;
+      const spaceBelow = window.innerHeight - rect.bottom;
+      let top;
+      if (spaceAbove >= th + 12 || spaceAbove > spaceBelow) {
+        top = rect.top - th - 8;
+      } else {
+        top = rect.bottom + 8;
+      }
+      tooltip.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 340 - 8)) + "px";
+      tooltip.style.top = top + "px";
+      tooltip.style.opacity = "1";
+    });
+    el.addEventListener("mouseleave", () => { tooltip.style.opacity = "0"; });
+  });
+}
+
 async function renderModels(main) {
   const data = await api("/api/models");
   state.models = data.models || [];
@@ -155,54 +188,148 @@ function renderModelTrainingConfig(model, columns) {
         <div class="model-config-name-row">
           ${field("name", "模型名称", model.name, "text")}
           <input name="target_column" type="hidden" value="${htmlEscape(modelTrainingTargetKey(model))}">
-          <div class="field model-help" data-help="${modelHelpAttr("target_column", model)}"><label>target_column</label><input type="text" value="${htmlEscape(modelTargetLabel(model))}" disabled></div>
+          <div class="field model-help" data-help="${modelHelpAttr("target_column", model)}"><label>目标列</label><input type="text" value="${htmlEscape(modelTargetLabel(model))}" disabled></div>
         </div>
-        <div class="model-feature-config">
-          <div class="model-config-subtitle model-help" data-help="${modelHelpAttr("feature_columns", model)}">feature_columns</div>
-          <div class="model-feature-grid">
-            ${columns.map((column) => `
-              <label class="model-feature-option model-help" data-help="${modelHelpAttr("feature_columns", model)}">
-                <input data-model-feature-column="${htmlEscape(column.key)}" type="checkbox" ${config.feature_columns.includes(column.key) ? "checked" : ""}>
-                <span>${htmlEscape(column.label)}</span>
-              </label>
-            `).join("")}
-          </div>
+
+        <div class="model-param-group expanded" data-model-group>
+          <div class="model-param-group-header">数据选择</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-feature-config">
+              <div class="model-config-subtitle model-help" data-help="${modelHelpAttr("feature_columns", model)}">输入特征列</div>
+              <div class="model-feature-grid">
+                ${columns.map((column) => `
+                  <label class="model-feature-option model-help" data-help="${modelHelpAttr("feature_columns", model)}">
+                    <input data-model-feature-column="${htmlEscape(column.key)}" type="checkbox" ${config.feature_columns.includes(column.key) ? "checked" : ""}>
+                    <span>${htmlEscape(column.label)}</span>
+                  </label>
+                `).join("")}
+              </div>
+            </div>
+            <div class="model-param-grid">
+              ${modelNumberField("valid_ratio", config.valid_ratio, 0.05, 0.5, "0.01", model)}
+              ${modelSelectField("split_method", [
+                { value: "time", label: "time（按时间切分）" },
+                { value: "random", label: "random（随机切分）" },
+              ], config.split_method, model)}
+            </div>
+          </div></div>
         </div>
-        <div class="model-param-grid">
-          ${modelNumberField("valid_ratio", config.valid_ratio, 0.05, 0.5, "0.01", model)}
-          ${modelSelectField("split_method", [
-            { value: "time", label: "time" },
-            { value: "random", label: "random" },
-          ], config.split_method, model)}
-          ${modelSelectField("objective", [
-            { value: "huber", label: "huber" },
-            { value: "regression_l2", label: "regression_l2" },
-            { value: "regression_l1", label: "regression_l1" },
-          ], config.objective, model)}
-          ${modelNumberField("learning_rate", config.learning_rate, 0.001, 1, "0.001", model)}
-          ${modelNumberField("num_boost_round", config.num_boost_round, 10, 2000, "1", model)}
-          ${modelNumberField("early_stopping_rounds", config.early_stopping_rounds, 0, 300, "1", model)}
-          ${modelNumberField("num_leaves", config.num_leaves, 2, 255, "1", model)}
-          ${modelNumberField("max_depth", config.max_depth, -1, 32, "1", model)}
-          ${modelNumberField("min_data_in_leaf", config.min_data_in_leaf, 1, 10000, "1", model)}
-          ${modelNumberField("lambda_l2", config.lambda_l2, 0, 1000, "0.01", model)}
-          ${modelNumberField("feature_fraction", config.feature_fraction, 0.1, 1, "0.01", model)}
-          ${modelNumberField("bagging_fraction", config.bagging_fraction, 0.1, 1, "0.01", model)}
-          ${modelNumberField("bagging_freq", config.bagging_freq, 0, 100, "1", model)}
+
+        <div class="model-param-group expanded" data-model-group>
+          <div class="model-param-group-header">任务与评价参数</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-param-grid">
+              ${modelSelectField("objective", [
+                { value: "regression_l2", label: "regression_l2（均方误差，数据平稳）" },
+                { value: "regression_l1", label: "regression_l1（绝对误差，异常点多）" },
+                { value: "huber", label: "huber（混合损失，推荐）" },
+              ], config.objective, model)}
+              ${modelCheckboxGroup("metric", [
+                { value: "rmse", label: "rmse（对大误差敏感）" },
+                { value: "mae", label: "mae（看平均误差）" },
+                { value: "mse", label: "mse（均方误差）" },
+              ], config.metric, model)}
+              ${modelSelectField("boosting_type", [
+                { value: "gbdt", label: "gbdt（最稳定，推荐）" },
+                { value: "dart", label: "dart（泛化可能更好）" },
+                { value: "rf", label: "rf（随机森林）" },
+              ], config.boosting_type, model)}
+              ${modelNumberField("learning_rate", config.learning_rate, 0.001, 1, "0.001", model)}
+              ${modelNumberField("num_boost_round", config.num_boost_round, 10, 2000, "1", model)}
+              ${modelNumberField("early_stopping_rounds", config.early_stopping_rounds, 0, 300, "1", model)}
+            </div>
+          </div></div>
         </div>
-        <div class="model-feature-config">
-          <div class="model-config-subtitle model-help" data-help="${modelHelpAttr("monotone_constraints", model)}">monotone_constraints</div>
-          <div class="model-constraint-grid">
-            ${columns.map((column) => `
-              <label class="model-constraint-row model-help" data-help="${modelHelpAttr("monotone_constraints", model)}">
-                <span>${htmlEscape(column.label)}</span>
-                <select data-model-monotone="${htmlEscape(column.key)}">
-                  ${[-1, 0, 1].map((value) => `<option value="${value}" ${Number(config.monotone_constraints[column.key] || 0) === value ? "selected" : ""}>${value}</option>`).join("")}
-                </select>
-              </label>
-            `).join("")}
-          </div>
+
+        <div class="model-param-group" data-model-group>
+          <div class="model-param-group-header">树结构复杂度参数</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-param-grid">
+              ${modelNumberField("num_leaves", config.num_leaves, 2, 255, "1", model)}
+              ${modelNumberField("max_depth", config.max_depth, -1, 32, "1", model)}
+              ${modelNumberField("min_data_in_leaf", config.min_data_in_leaf, 1, 10000, "1", model)}
+              ${modelNumberField("min_sum_hessian_in_leaf", config.min_sum_hessian_in_leaf, 0, 10, "0.001", model)}
+              ${modelNumberField("max_delta_step", config.max_delta_step, 0, 100, "0.1", model)}
+            </div>
+          </div></div>
         </div>
+
+        <div class="model-param-group" data-model-group>
+          <div class="model-param-group-header">分箱参数</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-param-grid">
+              ${modelNumberField("max_bin", config.max_bin, 2, 255, "1", model)}
+              ${modelNumberField("min_data_in_bin", config.min_data_in_bin, 1, 100, "1", model)}
+              ${modelNumberField("bin_construct_sample_cnt", config.bin_construct_sample_cnt, 100, 1000000, "1", model)}
+            </div>
+          </div></div>
+        </div>
+
+        <div class="model-param-group" data-model-group>
+          <div class="model-param-group-header">正则化参数</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-param-grid">
+              ${modelNumberField("lambda_l1", config.lambda_l1, 0, 1000, "0.1", model)}
+              ${modelNumberField("lambda_l2", config.lambda_l2, 0, 1000, "0.1", model)}
+              ${modelNumberField("min_gain_to_split", config.min_gain_to_split, 0, 10, "0.001", model)}
+              ${modelNumberField("path_smooth", config.path_smooth, 0, 100, "0.1", model)}
+              ${modelNumberField("linear_lambda", config.linear_lambda, 0, 1000, "0.1", model)}
+            </div>
+          </div></div>
+        </div>
+
+        <div class="model-param-group" data-model-group>
+          <div class="model-param-group-header">采样参数</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-param-grid">
+              ${modelNumberField("feature_fraction", config.feature_fraction, 0.1, 1, "0.01", model)}
+              ${modelNumberField("feature_fraction_bynode", config.feature_fraction_bynode, 0.1, 1, "0.01", model)}
+              ${modelNumberField("bagging_fraction", config.bagging_fraction, 0.1, 1, "0.01", model)}
+              ${modelNumberField("bagging_freq", config.bagging_freq, 0, 100, "1", model)}
+              ${modelSelectField("extra_trees", [
+                { value: "false", label: "关闭" },
+                { value: "true", label: "开启" },
+              ], String(Boolean(config.extra_trees)), model)}
+            </div>
+          </div></div>
+        </div>
+
+        <div class="model-param-group" data-model-group>
+          <div class="model-param-group-header">单调约束参数</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-feature-config">
+              <div class="model-config-subtitle model-help" data-help="${modelHelpAttr("monotone_constraints", model)}">单调约束</div>
+              <div class="model-constraint-grid">
+                ${columns.map((column) => `
+                  <label class="model-constraint-row model-help" data-help="${modelHelpAttr("monotone_constraints", model)}">
+                    <span>${htmlEscape(column.label)}</span>
+                    <select data-model-monotone="${htmlEscape(column.key)}">
+                      ${[-1, 0, 1].map((value) => `<option value="${value}" ${Number(config.monotone_constraints[column.key] || 0) === value ? "selected" : ""}>${value}</option>`).join("")}
+                    </select>
+                  </label>
+                `).join("")}
+              </div>
+            </div>
+          </div></div>
+        </div>
+
+        <div class="model-param-group" data-model-group>
+          <div class="model-param-group-header">随机性与复现参数</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-param-grid">
+              ${modelNumberField("seed", config.seed, 0, 999999, "1", model)}
+              ${modelNumberField("feature_fraction_seed", config.feature_fraction_seed, 0, 999999, "1", model)}
+              ${modelNumberField("bagging_seed", config.bagging_seed, 0, 999999, "1", model)}
+              ${modelNumberField("data_random_seed", config.data_random_seed, 0, 999999, "1", model)}
+              ${modelNumberField("extra_seed", config.extra_seed, 0, 999999, "1", model)}
+              ${modelSelectField("deterministic", [
+                { value: "true", label: "开启" },
+                { value: "false", label: "关闭" },
+              ], String(Boolean(config.deterministic)), model)}
+            </div>
+          </div></div>
+        </div>
+
         <div class="btn-row"><button class="btn ghost" type="submit">保存模型参数</button><span class="muted">模型不绑定投加点；训练完成后到工艺配置中按投加点选择使用。</span></div>
       </form>
     </section>
@@ -231,32 +358,66 @@ function modelSelectField(name, options, value, model) {
   `;
 }
 
+function modelCheckboxGroup(name, options, values, model) {
+  const selected = Array.isArray(values) ? values : [String(values)];
+  return `
+    <div class="field model-help" data-help="${modelHelpAttr(name, model)}">
+      <label>${name}</label>
+      <div class="model-checkbox-group">
+        ${options.map((opt) => `
+          <label>
+            <input type="checkbox" name="${name}" value="${htmlEscape(opt.value)}" ${selected.includes(opt.value) ? "checked" : ""}>
+            <span>${htmlEscape(opt.label)}</span>
+          </label>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function modelHelpAttr(name, model) {
   return htmlEscape(modelParamHelp(name, model)).replaceAll("\n", "&#10;");
 }
 
 function modelParamHelp(name, model) {
-  const targetDefault = modelTargetLabel(model);
-  const featureDefault = "默认勾选当前模型全部输入字段";
   const helps = {
-    target_column: `作用：预测目标列\\A建议默认值：${targetDefault}\\A调整建议：不同模型类型必须对应不同目标列，页面会按模型类型自动固定。`,
-    feature_columns: `作用：输入字段\\A建议默认值：${featureDefault}\\A调整建议：不同数据表字段变化时调整；至少保留 1 个有变化的数值字段。`,
-    valid_ratio: "作用：验证集比例\\A建议默认值：0.2\\A调整建议：数据少用 0.2，数据多可调到 0.15。",
-    split_method: "作用：划分方式\\A建议默认值：time\\A调整建议：工业时序数据必须按时间切分；只在明确要随机抽样验证时用 random。",
-    objective: "作用：损失函数\\A建议默认值：huber\\A调整建议：异常点多用 huber，数据平稳可用 regression_l2。",
-    learning_rate: "作用：学习率\\A建议默认值：0.03\\A调整建议：数据少不要太大；训练波动大时降低。",
-    num_boost_round: "作用：最大树数量\\A建议默认值：300~500，当前默认 500\\A调整建议：配合 early_stopping 使用，数据多可适当增加。",
-    early_stopping_rounds: "作用：早停轮数\\A建议默认值：30~50，当前默认 50\\A调整建议：数据少用 30，数据多用 50。",
-    num_leaves: "作用：树复杂度\\A建议默认值：7 或 15，当前默认 7\\A调整建议：数据少用 7，数据多且欠拟合时可调到 15。",
-    max_depth: "作用：树最大深度\\A建议默认值：3 或 4，当前默认 3\\A调整建议：数据少用 3，欠拟合时再尝试 4。",
-    min_data_in_leaf: "作用：每个叶子最少样本\\A建议默认值：20\\A调整建议：数据越少越要大；过拟合时调大。",
-    lambda_l2: "作用：L2正则\\A建议默认值：1~5，当前默认 3\\A调整建议：过拟合时调大，欠拟合明显时调小。",
-    feature_fraction: "作用：每棵树使用多少特征\\A建议默认值：1.0\\A调整建议：特征很多时可用 0.8~0.9；当前特征不多建议 1.0。",
-    bagging_fraction: "作用：每轮使用多少样本\\A建议默认值：0.85~0.9，当前默认 0.85\\A调整建议：数据多时可用，数据少不要太低。",
-    bagging_freq: "作用：bagging 频率\\A建议默认值：1\\A调整建议：一般固定 1；设为 0 表示关闭 bagging。",
-    monotone_constraints: "作用：单调约束\\A建议默认值：按字段配置，普通字段为 0\\A调整建议：PAC、加药单耗等字段可设 -1，表示该字段越大预测TP只能下降或不变。",
+    target_column: "预测目标列。不同模型类型对应不同目标列，页面会按模型类型自动固定。",
+    feature_columns: "输入特征列。选择用于训练模型的输入变量，至少保留1个有变化的数值字段。",
+    valid_ratio: "验证集比例（0.05~0.5）。数据少用0.2，数据多可调到0.15。",
+    split_method: "划分方式。工业时序数据建议按time时间切分；random用于随机抽样验证。",
+    objective: "损失函数。普通连续值预测用regression_l2；异常值多用regression_l1或huber。预测PAC投加量用regression_l2；仪表异常点多用huber。",
+    metric: "评价指标。rmse对大误差敏感，适合看TP超标风险；mae看平均误差。",
+    boosting_type: "提升方式。gbdt最稳定；dart泛化可能更好但不稳定；rf类似随机森林。小样本水厂数据建议先用gbdt。",
+    learning_rate: "学习率（0.001~1.0）。越小越稳但需要更多轮数。默认0.05；模型波动大改0.03；数据多可用0.05~0.08。",
+    num_boost_round: "最大训练轮数（10~2000）。learning_rate=0.05时可设300；0.03时可设500。",
+    early_stopping_rounds: "早停轮数（0~300）。验证集指标连续N轮不改善则停止。数据少用30，数据多用50。",
+    num_leaves: "每棵树最多叶子数（2~255）。直接控制模型复杂度。过拟合调小，欠拟合调大。小样本设5~15；数据多可设31。",
+    max_depth: "树最大深度（-1~32）。-1表示无限制。过拟合调小；关系复杂时调大。小样本设2~4；模型太钝可设5。",
+    min_data_in_leaf: "叶子最少样本数（1~10000）。过拟合调大，欠拟合调小。几百条数据设6~20；几千条设20~50。",
+    min_sum_hessian_in_leaf: "叶子最小权重和（0~10）。更细的复杂度限制。一般不动；过拟合严重可调大。默认0.001。",
+    max_delta_step: "叶子输出最大变化限制（0~100）。预测值跳变大时设置。默认0不限制；PAC建议值跳太猛可试1~5。",
+    max_bin: "每个特征最多分箱数（2~255）。值大更精细但容易过拟合。小样本建议63或127；数据多可用255。",
+    min_data_in_bin: "每个分箱最少样本数（1~100）。过拟合调大；数据少不要太大。默认3；仪表噪声多可设5~10。",
+    bin_construct_sample_cnt: "构建分箱用样本数（100~1000000）。数据量不大一般不用改。默认200000。",
+    lambda_l1: "L1正则（0~1000）。让模型更稀疏。过拟合调大；欠拟合调小。默认可设0.3；过拟合试1~5。",
+    lambda_l2: "L2正则（0~1000）。让模型更平滑。小样本建议偏大；模型太钝则调小。默认可设20；预测不灵敏可降到5~10。",
+    min_gain_to_split: "最小分裂收益（0~10）。节点继续分裂所需的最小收益。过拟合调大；欠拟合调小。默认0.02；过拟合试0.05~0.1。",
+    path_smooth: "路径平滑（0~100）。让叶子节点输出更平滑。默认0；PAC投加量跳动明显可试1~5。",
+    linear_lambda: "线性树正则（0~1000）。普通gbdt基本不用。默认0即可。",
+    feature_fraction: "特征采样比例（0.1~1.0）。每轮随机使用一部分特征。特征多、过拟合时调小。默认0.9；过拟合可设0.7~0.8。",
+    feature_fraction_bynode: "节点特征采样比例（0.1~1.0）。更细粒度的特征采样，一般不动。默认1.0。",
+    bagging_fraction: "样本采样比例（0.1~1.0）。每轮随机使用一部分样本。过拟合时调小。默认0.9；过拟合可设0.7~0.8。",
+    bagging_freq: "Bagging频率（0~100）。每隔多少轮执行一次样本采样。0表示关闭；建议1表示每轮都采样。",
+    extra_trees: "使用更随机的分裂方式。泛化可能更好，但结果会更随机。默认关闭；过拟合严重可开启。",
+    monotone_constraints: "单调约束。每个字段可选-1/0/1。PAC、加药单耗等字段可设-1，表示该字段越大预测值只能下降或不变。",
+    seed: "总随机种子（0~999999）。固定值方便复现实验。推荐42。",
+    feature_fraction_seed: "特征采样随机种子（0~999999）。一般和seed保持一致。",
+    bagging_seed: "样本采样随机种子（0~999999）。一般和seed保持一致。",
+    data_random_seed: "数据分箱随机种子（0~999999）。一般不用单独改。",
+    extra_seed: "extra_trees使用的随机种子（0~999999）。只有开启extra_trees时明显。",
+    deterministic: "尽量保证相同数据训练结果一致。工程系统建议开启。",
   };
-  return (helps[name] || "").replaceAll("\\A", "\n");
+  return helps[name] || "";
 }
 
 function modelTrainingTargetKey(model) {
@@ -275,17 +436,36 @@ function modelTrainingConfig(model, columns) {
     valid_ratio: raw.valid_ratio ?? 0.2,
     split_method: raw.split_method || "time",
     objective: raw.objective || "huber",
-    learning_rate: raw.learning_rate ?? 0.03,
-    num_boost_round: raw.num_boost_round ?? 500,
+    metric: Array.isArray(raw.metric) && raw.metric.length ? raw.metric : (raw.metric ? [String(raw.metric)] : ["rmse"]),
+    boosting_type: raw.boosting_type || "gbdt",
+    learning_rate: raw.learning_rate ?? 0.05,
+    num_boost_round: raw.num_boost_round ?? 300,
     early_stopping_rounds: raw.early_stopping_rounds ?? 50,
-    num_leaves: raw.num_leaves ?? 7,
-    max_depth: raw.max_depth ?? 3,
+    num_leaves: raw.num_leaves ?? 15,
+    max_depth: raw.max_depth ?? 4,
     min_data_in_leaf: raw.min_data_in_leaf ?? 20,
-    lambda_l2: raw.lambda_l2 ?? 3,
-    feature_fraction: raw.feature_fraction ?? 1,
-    bagging_fraction: raw.bagging_fraction ?? 0.85,
+    min_sum_hessian_in_leaf: raw.min_sum_hessian_in_leaf ?? 0.001,
+    max_delta_step: raw.max_delta_step ?? 0,
+    max_bin: raw.max_bin ?? 255,
+    min_data_in_bin: raw.min_data_in_bin ?? 3,
+    bin_construct_sample_cnt: raw.bin_construct_sample_cnt ?? 200000,
+    lambda_l1: raw.lambda_l1 ?? 0.3,
+    lambda_l2: raw.lambda_l2 ?? 20,
+    min_gain_to_split: raw.min_gain_to_split ?? 0.02,
+    path_smooth: raw.path_smooth ?? 0,
+    linear_lambda: raw.linear_lambda ?? 0,
+    feature_fraction: raw.feature_fraction ?? 0.9,
+    feature_fraction_bynode: raw.feature_fraction_bynode ?? 1.0,
+    bagging_fraction: raw.bagging_fraction ?? 0.9,
     bagging_freq: raw.bagging_freq ?? 1,
+    extra_trees: raw.extra_trees ?? false,
     monotone_constraints: constraints,
+    seed: raw.seed ?? 42,
+    feature_fraction_seed: raw.feature_fraction_seed ?? 42,
+    bagging_seed: raw.bagging_seed ?? 42,
+    data_random_seed: raw.data_random_seed ?? 42,
+    extra_seed: raw.extra_seed ?? 42,
+    deterministic: raw.deterministic ?? true,
   };
 }
 
@@ -298,41 +478,53 @@ function modelProjectPayload(form, model, columns) {
   form.querySelectorAll("[data-model-monotone]").forEach((node) => {
     monotoneConstraints[node.dataset.modelMonotone] = Number(node.value);
   });
+  const metricValues = [...form.querySelectorAll('input[name="metric"]:checked')].map((node) => node.value);
   payload.training_config = {
     target_column: modelTrainingTargetKey(model),
     feature_columns: featureColumns,
     valid_ratio: Number(payload.valid_ratio),
     split_method: payload.split_method,
     objective: payload.objective,
+    metric: metricValues.length ? metricValues : ["rmse"],
+    boosting_type: payload.boosting_type,
     learning_rate: Number(payload.learning_rate),
     num_boost_round: Number(payload.num_boost_round),
     early_stopping_rounds: Number(payload.early_stopping_rounds),
     num_leaves: Number(payload.num_leaves),
     max_depth: Number(payload.max_depth),
     min_data_in_leaf: Number(payload.min_data_in_leaf),
+    min_sum_hessian_in_leaf: Number(payload.min_sum_hessian_in_leaf),
+    max_delta_step: Number(payload.max_delta_step),
+    max_bin: Number(payload.max_bin),
+    min_data_in_bin: Number(payload.min_data_in_bin),
+    bin_construct_sample_cnt: Number(payload.bin_construct_sample_cnt),
+    lambda_l1: Number(payload.lambda_l1),
     lambda_l2: Number(payload.lambda_l2),
+    min_gain_to_split: Number(payload.min_gain_to_split),
+    path_smooth: Number(payload.path_smooth),
+    linear_lambda: Number(payload.linear_lambda),
     feature_fraction: Number(payload.feature_fraction),
+    feature_fraction_bynode: Number(payload.feature_fraction_bynode),
     bagging_fraction: Number(payload.bagging_fraction),
     bagging_freq: Number(payload.bagging_freq),
+    extra_trees: payload.extra_trees === "true",
     monotone_constraints: monotoneConstraints,
+    seed: Number(payload.seed),
+    feature_fraction_seed: Number(payload.feature_fraction_seed),
+    bagging_seed: Number(payload.bagging_seed),
+    data_random_seed: Number(payload.data_random_seed),
+    extra_seed: Number(payload.extra_seed),
+    deterministic: payload.deterministic === "true",
   };
   [
-    "target_column",
-    "feature_columns",
-    "valid_ratio",
-    "split_method",
-    "objective",
-    "learning_rate",
-    "num_boost_round",
-    "early_stopping_rounds",
-    "num_leaves",
-    "max_depth",
-    "min_data_in_leaf",
-    "lambda_l2",
-    "feature_fraction",
-    "bagging_fraction",
-    "bagging_freq",
+    "target_column", "feature_columns", "valid_ratio", "split_method",
+    "objective", "metric", "boosting_type", "learning_rate", "num_boost_round", "early_stopping_rounds",
+    "num_leaves", "max_depth", "min_data_in_leaf", "min_sum_hessian_in_leaf", "max_delta_step",
+    "max_bin", "min_data_in_bin", "bin_construct_sample_cnt",
+    "lambda_l1", "lambda_l2", "min_gain_to_split", "path_smooth", "linear_lambda",
+    "feature_fraction", "feature_fraction_bynode", "bagging_fraction", "bagging_freq", "extra_trees",
     "monotone_constraints",
+    "seed", "feature_fraction_seed", "bagging_seed", "data_random_seed", "extra_seed", "deterministic",
   ].forEach((key) => { delete payload[key]; });
   return payload;
 }
@@ -385,6 +577,13 @@ function modelTargetLabel(model) {
 
 function wireModelWorkspace(detail) {
   const model = detail.model;
+  const workspace = document.querySelector(".model-workspace-body");
+  if (workspace) initModelHelpTooltips(workspace);
+  document.querySelectorAll("[data-model-group] .model-param-group-header").forEach((header) => {
+    header.addEventListener("click", () => {
+      header.closest("[data-model-group]").classList.toggle("expanded");
+    });
+  });
   document.getElementById("modelConfigForm")?.addEventListener("submit", (event) => saveModelProject(event, model, detail.columns));
   document.getElementById("deleteModelBtn")?.addEventListener("click", () => deleteModelProject(model));
   document.getElementById("refreshModelSamplesBtn")?.addEventListener("click", async () => { await renderPage(); });

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -92,6 +93,97 @@ def trends(
                     "points": [{"time": row["time"], "value": row["value"]} for row in rows],
                 }
     return {"dosing_point_id": dosing_point_id, "hours": hours, "series": series}
+
+
+@router.get("/api/savings")
+def savings(
+    dosing_point_id: int = Query(1, ge=1),
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+) -> dict[str, Any]:
+    now = datetime.now()
+    end_dt = datetime.fromisoformat(end) if end else now
+    start_dt = datetime.fromisoformat(start) if start else (end_dt - timedelta(hours=3))
+    start_iso = start_dt.isoformat()
+    end_iso = end_dt.isoformat()
+    with db_session() as con:
+        point = con.execute(
+            "SELECT * FROM dosing_points WHERE id=?",
+            (dosing_point_id,),
+        ).fetchone()
+        if not point:
+            return {"dosing_point_id": dosing_point_id, "start": start_iso, "end": end_iso, "total_savings": 0.0, "unit": "L", "points": []}
+        pac_actual_tag_id = point["pac_flow_tag_id"]
+        recommend_tag_id = None
+        rtag = con.execute(
+            "SELECT id FROM sensor_tags WHERE dosing_point_id=? AND tag_type='RECOMMEND_PAC'",
+            (dosing_point_id,),
+        ).fetchone()
+        if rtag:
+            recommend_tag_id = rtag["id"]
+        actual_points: dict[str, float] = {}
+        if pac_actual_tag_id:
+            for row in con.execute(
+                "SELECT sample_time AS time, value FROM sensor_samples WHERE tag_id=? AND sample_time>=? AND sample_time<=? ORDER BY sample_time",
+                (pac_actual_tag_id, start_iso, end_iso),
+            ).fetchall():
+                actual_points[row["time"]] = float(row["value"])
+        if not recommend_tag_id:
+            rec_rows = con.execute(
+                "SELECT recommend_time AS time, final_l_h FROM recommendations WHERE dosing_point_id=? AND recommend_time>=? AND recommend_time<=? AND source='online' ORDER BY recommend_time",
+                (dosing_point_id, start_iso, end_iso),
+            ).fetchall()
+            recommend_points: dict[str, float] = {row["time"]: float(row["final_l_h"]) for row in rec_rows}
+        else:
+            recommend_points = {}
+            for row in con.execute(
+                "SELECT sample_time AS time, value FROM sensor_samples WHERE tag_id=? AND sample_time>=? AND sample_time<=? ORDER BY sample_time",
+                (recommend_tag_id, start_iso, end_iso),
+            ).fetchall():
+                recommend_points[row["time"]] = float(row["value"])
+        actual_list = sorted(
+            [{"time": k, "value": v} for k, v in actual_points.items()],
+            key=lambda x: x["time"],
+        )
+        recommend_list = sorted(
+            [{"time": k, "value": v} for k, v in recommend_points.items()],
+            key=lambda x: x["time"],
+        )
+        rec_times = [datetime.fromisoformat(r["time"]).timestamp() for r in recommend_list]
+        rec_values = [r["value"] for r in recommend_list]
+        curve_points: list[dict[str, Any]] = []
+        total_savings = 0.0
+        prev_time = None
+        match_window = 120.0
+        for a in actual_list:
+            a_ts = datetime.fromisoformat(a["time"]).timestamp()
+            idx = bisect.bisect_left(rec_times, a_ts)
+            best_r_val = None
+            for offset in (0, -1):
+                ci = idx + offset
+                if 0 <= ci < len(rec_times):
+                    dt = abs(a_ts - rec_times[ci])
+                    if dt <= match_window:
+                        best_r_val = rec_values[ci]
+                        break
+            if best_r_val is not None:
+                diff = a["value"] - best_r_val
+                if prev_time is not None:
+                    try:
+                        dt_hours = (a_ts - datetime.fromisoformat(prev_time).timestamp()) / 3600.0
+                    except (ValueError, TypeError):
+                        dt_hours = 0
+                    total_savings += diff * dt_hours
+                prev_time = a["time"]
+                curve_points.append({"time": a["time"], "value": round(diff, 4)})
+        return {
+            "dosing_point_id": dosing_point_id,
+            "start": start_iso,
+            "end": end_iso,
+            "total_savings": round(total_savings, 2),
+            "unit": "L",
+            "points": curve_points,
+        }
 
 
 def tag_series_rows(con, tag_id: int | None, since: str) -> list[dict[str, Any]]:
