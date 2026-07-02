@@ -13,6 +13,7 @@
 - 数据采集：支持 API/CSV 写入、手动轮询和 S7-1500 PLC 读取采集点。
 - 历史数据：展示采集点历史曲线和表格，支持按天数清理。
 - 报警事件：记录并确认数据质量、PLC 等报警。
+- 节省加药流量：在总览页展示实际加药流量与推荐流量的差值曲线和累计节省量，支持自由选择时间范围。
 - 系统设置：支持数据库备份、运行设置维护，并显示本机外部访问地址。
 
 ## 推荐与模型逻辑
@@ -57,17 +58,34 @@
 - `valid_ratio`
 - `split_method`
 - `objective`
+- `metric`（支持多选：rmse / mae / mse）
+- `boosting_type`
 - `learning_rate`
 - `num_boost_round`
 - `early_stopping_rounds`
 - `num_leaves`
 - `max_depth`
 - `min_data_in_leaf`
+- `min_sum_hessian_in_leaf`
+- `max_delta_step`
+- `max_bin`
+- `min_data_in_bin`
+- `bin_construct_sample_cnt`
+- `lambda_l1`
 - `lambda_l2`
+- `min_gain_to_split`
+- `path_smooth`
+- `linear_lambda`
 - `feature_fraction`
+- `feature_fraction_bynode`
 - `bagging_fraction`
 - `bagging_freq`
+- `extra_trees`
 - `monotone_constraints`
+- `seed`、`feature_fraction_seed`、`bagging_seed`、`data_random_seed`、`extra_seed`
+- `deterministic`
+
+参数按功能分为 8 组：数据选择、任务与评价参数、树结构复杂度参数、分箱参数、正则化参数、采样参数、单调约束参数、随机性与复现参数。每组可展开或折叠。
 
 参数项支持鼠标悬停查看建议默认值和调整建议。训练样本可手动记录，也可开启实时记录并设置记录周期。
 
@@ -78,6 +96,24 @@ CSV 样本导入支持 `utf-8-sig`、`utf-8`、`gb18030`、`gbk` 编码，时间
 - `2026/5/20`
 - `2026-05-20 00:00:00`
 - `2026-05-20T00:00:00`
+
+## 总览页面布局
+
+总览页分为三行区域：
+
+**第一行**：投加点指标卡片，每个卡片显示投加点名称、模式标签、推荐流量(L/h)、参考流量、进水TP、出水TP、预测TP、加药流量。点击卡片切换选中投加点。
+
+**第二行**（三个等宽趋势面板，每个面板右上角支持 3h/6h/12h 时间切换）：
+
+- 出水TP趋势：显示 TP_OUT 和 PREDICT_TP 两条曲线
+- 加药流量趋势：显示 PAC_ACTUAL 和 RECOMMEND_PAC 两条曲线
+- 节省加药流量：顶部显示累计节省量（正值表示节省、负值表示多消耗），下方显示差值曲线（实际流量-推荐流量），支持自由选择起始和结束时间
+
+**第三行**（三个等宽面板）：
+
+- 推荐解释：展示保守公式→原始建议→限幅后的公式推导链、预测TP文本和推荐理由标签
+- 报警事件：活动报警列表，支持全部确认
+- PLC通讯：设备在线摘要和设备列表（名称、协议、IP、状态）
 
 ## 技术栈
 
@@ -123,7 +159,19 @@ app/
 static/
   index.html                 # 单页应用入口
   app.js                     # 兼容性语法检查入口
-  js/                        # 无构建前端脚本
+  js/
+    state.js                 # 全局状态管理
+    format.js                # 格式化工具函数
+    api.js                   # API 请求封装
+    boot.js                  # 应用引导、导航渲染
+    start.js                 # 应用启动入口
+    pages/
+      overview.js             # 总览页面
+      process.js              # 工艺配置页面
+      data.js                 # 数据管理页面
+      models.js               # 模型管理页面
+      plc.js                  # PLC 设备页面
+      alarms-settings.js      # 报警与设置页面
   styles.css                 # 页面样式
 tests/
   test_recommendation.py     # 推荐计算、采集、模型样本相关测试
@@ -131,6 +179,7 @@ data/
   ai_pac.sqlite              # 运行时数据库，首次启动自动创建
 docs/
   CODING_STANDARDS.md        # 代码组织和拆分规范
+  API_REFERENCE.md            # 全部 API 接口文档
   MAINTENANCE.md             # 运维、发布、排障和回归测试文档
 ```
 
@@ -201,6 +250,22 @@ GET /api/dashboard
 ```
 
 返回推荐结果、报警、PLC、模型和数据质量摘要。
+
+### 趋势数据
+
+```text
+GET /api/trends?dosing_point_id=1&hours=3
+```
+
+返回指定投加点和时间范围内的多组趋势序列。
+
+### 节省加药流量
+
+```text
+GET /api/savings?dosing_point_id=1&start=2026-07-02T11:00:00&end=2026-07-02T14:00:00
+```
+
+返回累计节省量（L）和差值时间序列。`start`/`end` 为 ISO 时间字符串，默认 end 为当前时间、start 为 end 前 3 小时。差值计算方式为 `实际加药流量 - 推荐流量`，正值表示实际用量大于推荐（多用），负值表示实际用量小于推荐（节省）。积分方式为梯形积分。实际流量与推荐流量的时间匹配采用 120 秒窗口就近匹配。
 
 ### 系统访问地址
 
