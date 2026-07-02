@@ -18,6 +18,7 @@
 9. [collection — 数据采集与历史](#9-collection--数据采集与历史)
 10. [ingest — 数据导入](#10-ingest--数据导入)
 11. [trends — 趋势分析](#11-trends--趋势分析)
+12. [auth — 认证](#12-auth--认证)
 
 ---
 
@@ -154,6 +155,24 @@
 
 ---
 
+## 12. auth — 认证
+
+| 方法 | 路径 | 说明 | 请求体 | 返回值 |
+|------|------|------|--------|--------|
+| POST | `/api/auth/login` | 用户登录 | `username`, `password` | `ok`, `user`{`id`,`username`,`role`}, `token` |
+| GET | `/api/auth/me` | 获取当前用户 | `X-Token` header | `authenticated`, `user`, `role` |
+| POST | `/api/auth/logout` | 退出登录 | `X-Token` header | `ok` |
+| PUT | `/api/auth/password` | 修改密码 | `X-Token` header, `old_password`, `new_password` | `ok` / `detail` |
+
+说明：
+
+- 登录成功后返回随机 session token，前端存入 localStorage，后续请求通过 `X-Token` header 携带
+- token 有效期 7 天
+- 修改密码后自动清除该用户所有 session，需重新登录
+- 密码存储使用 PBKDF2-HMAC-SHA256 + 随机 salt，100000 轮迭代
+
+---
+
 ## 路由统计
 
 | 模块 | 路由数 |
@@ -169,6 +188,7 @@
 | collection | 10 |
 | ingest | 4 |
 | trends | 2 |
-| **合计** | **57** |
+| auth | 4 |
+| **合计** | **61** |
 
 > 注：上表中 `GET /api/settings` 同时出现在 settings 模块的通用设置和 network 子模块中，实际独立路由为 56 条，`GET /api/settings/network` 作为 `/api/settings/{key}` 的特例在代码中有独立端点实现，因此路由端点共 57 个（56 条独立路由逻辑）。

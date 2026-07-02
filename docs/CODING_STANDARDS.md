@@ -145,7 +145,23 @@ ai_pac/
 - 不在服务层定义类来持有状态；使用普通模块级函数或简单的数据容器。
 - 服务函数应做到可独立测试（传入 mock 连接即可）。
 
-### 2.6 错误处理
+### 2.6 认证规范
+
+- 密码存储使用 PBKDF2-HMAC-SHA256 + 随机 salt，100000 轮迭代：
+
+  ```python
+  def _hash_password(password: str) -> str:
+      salt = secrets.token_hex(16)
+      pwdhash = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+      return salt + pwdhash.hex()
+  ```
+
+- 认证使用随机 session token（`secrets.token_urlsafe(32)`），有效期 7 天，存入 `user_sessions` 表。
+- 验证 token 时从 `request.headers` 直接读取 `x-token` / `X-Token`，不依赖 FastAPI `Header()` 对自定义 header 的解析。
+- 修改密码后自动清除该用户的所有 session，强制重新登录。
+- 无需额外依赖（bcrypt/jwt 等），纯 Python 标准库实现。
+
+### 2.7 错误处理
 
 - API 层统一使用 `try/except`，返回 HTTP 异常：
 
@@ -205,6 +221,17 @@ ai_pac/
   ```
 
 - `api()` 内部处理 JSON 序列化、错误提取和异常抛出，页面代码无需重复处理。
+- GET 请求不带 `Content-Type` header，避免浏览器产生预检请求。
+- 认证 token 从 `localStorage` 读取，通过 `X-Token` header 发送：
+
+  ```javascript
+  const token = localStorage.getItem("token");
+  if (token) {
+    init.headers = { ...init.headers, "X-Token": token };
+  }
+  ```
+
+- token 失效时（后端返回 `{"authenticated": false}`），前端自动清除 `localStorage` 中的 token。
 
 ### 3.4 页面函数命名
 
