@@ -3,13 +3,15 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import lightgbm as lgb
 import numpy as np
+import pandas as pd
 
 from app.database import DEFAULT_UNIT_DOSE_CURVE, clear_alarm, dumps_json, loads_json, parse_dt, upsert_alarm, utc_now_iso
+from app.services import wwtp_ai_engine
 
 
 PROCESS_SOURCE_MAP = [
@@ -245,6 +247,273 @@ def active_model(con: sqlite3.Connection, dosing_point_id: int, model_kind: str)
     ).fetchone()
 
 
+def dual_task_model(con: sqlite3.Connection, dosing_point_id: int) -> sqlite3.Row | None:
+    point = con.execute("SELECT dual_model_id FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
+    if not point or point["dual_model_id"] is None:
+        return None
+    return con.execute(
+        """
+        SELECT * FROM model_projects
+        WHERE id=? AND model_kind='ai_pac_dual_task' AND trained_at IS NOT NULL
+        LIMIT 1
+        """,
+        (point["dual_model_id"],),
+    ).fetchone()
+
+
+def fetch_history_for_dual_model(con: sqlite3.Connection, dosing_point_id: int, now: datetime) -> pd.DataFrame | None:
+    """为双任务模型获取最近约14小时的历史数据（至少80条）"""
+    point = con.execute("SELECT * FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
+    if not point:
+        return None
+
+    tag_field_map = {
+        "in_flow_tag_id": "inflow_flow",
+        "in_tp_tag_id": "inflow_tp",
+        "in_ph_tag_id": "inflow_ph",
+        "out_tp_tag_id": "outflow_tp",
+        "reflux_flow_1_tag_id": "high_density_a1_return",
+        "reflux_flow_2_tag_id": "high_density_a2_return",
+        "bio_orp1_tag_id": "orp_east_1",
+        "bio_orp2_tag_id": "orp_east_2",
+        "bio_orp3_tag_id": "orp_west_1",
+        "bio_orp4_tag_id": "orp_west_2",
+        "bio_mlss1_tag_id": "mlss_east",
+        "bio_mlss2_tag_id": "mlss_west",
+        "pac_flow_tag_id": "pac_dosage",
+    }
+
+    tag_ids = []
+    id_to_col = {}
+    for field, col in tag_field_map.items():
+        tid = point[field]
+        if tid is not None:
+            tag_ids.append(tid)
+            id_to_col[tid] = col
+
+    if not tag_ids:
+        return None
+
+    # 获取最近14小时的数据
+    since = (now - timedelta(hours=14)).isoformat()
+    placeholders = ",".join("?" * len(tag_ids))
+    rows = con.execute(
+        f"""
+        SELECT tag_id, sample_time, value
+        FROM sensor_samples
+        WHERE tag_id IN ({placeholders}) AND sample_time >= ? AND quality='good'
+        ORDER BY sample_time DESC
+        """,
+        (*tag_ids, since),
+    ).fetchall()
+
+    if not rows:
+        return None
+
+    # 构建DataFrame：按时间合并所有tag的值
+    records = []
+    for row in rows:
+        records.append({
+            "timestamp": row["sample_time"],
+            "tag_col": id_to_col.get(row["tag_id"]),
+            "value": row["value"],
+        })
+
+    df = pd.DataFrame(records)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+    # pivot：每个时间点一行，每个tag一列
+    pivoted = df.pivot_table(index="timestamp", columns="tag_col", values="value", aggfunc="mean")
+    pivoted = pivoted.reset_index()
+
+    # 确保所有需要的列都存在
+    for col in tag_field_map.values():
+        if col not in pivoted.columns:
+            pivoted[col] = np.nan
+
+    # 按时间排序，取最近80条
+    pivoted = pivoted.sort_values("timestamp").tail(80).reset_index(drop=True)
+
+    # 前向填充缺失值
+    for col in tag_field_map.values():
+        pivoted[col] = pivoted[col].ffill().bfill()
+
+    # 删除仍有NaN的行
+    pivoted = pivoted.dropna(subset=list(tag_field_map.values())).reset_index(drop=True)
+
+    return pivoted if len(pivoted) >= 36 else None
+
+
+def predict_dual_task_model(
+    model: sqlite3.Row,
+    history_df: pd.DataFrame,
+) -> tuple[float | None, float | None, dict[str, Any] | None, str | None]:
+    """使用双任务模型预测 PAC 加药量和下次出水TP"""
+    artifact = loads_json(model["artifact_json"], {})
+    if artifact.get("format") != "ai_pac_dual_task_v1":
+        return None, None, None, "模型文件格式已过期，请重新训练"
+    if not artifact.get("booster_models") or not artifact.get("feature_names"):
+        return None, None, None, "模型文件无效"
+
+    try:
+        # 直接用 model_str 加载模型，避免临时文件 I/O 和 format error
+        import lightgbm as lgb
+        from collections import deque
+
+        booster1 = lgb.Booster(model_str=artifact["booster_models"]["task1"])
+        booster2 = lgb.Booster(model_str=artifact["booster_models"]["task2"])
+        features1 = artifact["feature_names"]["task1"]
+        features2 = artifact["feature_names"]["task2"]
+
+        # 构造 InferencePipeline 实例（绕过文件加载）
+        pipeline = wwtp_ai_engine.InferencePipeline.__new__(wwtp_ai_engine.InferencePipeline)
+        pipeline.model1 = booster1
+        pipeline.model2 = booster2
+        pipeline.features1 = features1
+        pipeline.features2 = features2
+        pipeline.history = deque(maxlen=80)
+
+        pipeline.init_history(history_df)
+        result = pipeline.predict()
+
+        if result.get("status") != "ok":
+            return None, None, None, result.get("message", "推理失败")
+
+        pac_pred = float(result["pac_dosage_prediction"])
+        next_tp_pred = float(result["next_outflow_tp_prediction"])
+        detail = {
+            "model_id": model["id"],
+            "version": model["name"],
+            "format": artifact.get("format"),
+            "pac_dosage_prediction": pac_pred,
+            "tp_delta_prediction": result["tp_delta_prediction"],
+            "current_outflow_tp": result["current_outflow_tp"],
+            "next_outflow_tp_prediction": next_tp_pred,
+        }
+        return pac_pred, next_tp_pred, detail, None
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return None, None, None, f"双任务模型推理异常: {exc}"
+
+
+def _predict_tp_for_pac(
+    history_df: pd.DataFrame,
+    candidate_pac: float,
+    pipeline: Any,
+    booster2: Any,
+    features2: list[str],
+) -> float:
+    """给定候选PAC加药量，预测出水TP"""
+    modified = history_df.copy()
+    modified.iloc[-1, modified.columns.get_loc("pac_dosage")] = candidate_pac
+    pipeline.history.clear()
+    for _, row in modified.iterrows():
+        pipeline.history.append(row.to_dict())
+    features_df = pipeline._compute_features()
+    X2 = features_df[features2]
+    tp_delta = float(booster2.predict(X2)[0])
+    return float(history_df["outflow_tp"].iloc[-1]) + tp_delta
+
+
+def optimize_pac_for_target_tp_dual(
+    model: sqlite3.Row,
+    history_df: pd.DataFrame,
+    control: sqlite3.Row,
+) -> tuple[float | None, float | None, dict[str, Any] | None, str | None]:
+    """基于双任务模型的任务2，反向优化：二分搜索找到满足目标TP的最小PAC加药量"""
+    target_tp = float(control["tp_target_mg_l"])
+    min_l_h = float(control["pac_min_l_h"])
+    max_l_h = float(control["pac_max_l_h"])
+    if max_l_h < min_l_h:
+        return None, None, None, "最大加药量小于最小加药量"
+
+    artifact = loads_json(model["artifact_json"], {})
+    if artifact.get("format") != "ai_pac_dual_task_v1":
+        return None, None, None, "模型文件格式已过期"
+    if not artifact.get("booster_models") or not artifact.get("feature_names"):
+        return None, None, None, "模型文件无效"
+
+    try:
+        import lightgbm as lgb
+        from collections import deque
+
+        booster2 = lgb.Booster(model_str=artifact["booster_models"]["task2"])
+        features2 = artifact["feature_names"]["task2"]
+
+        pipeline = wwtp_ai_engine.InferencePipeline.__new__(wwtp_ai_engine.InferencePipeline)
+        pipeline.model1 = None
+        pipeline.model2 = booster2
+        pipeline.features1 = []
+        pipeline.features2 = features2
+        pipeline.history = deque(maxlen=80)
+
+        current_tp = float(history_df["outflow_tp"].iloc[-1])
+        checked = 0
+
+        # 先检查边界
+        tp_at_min = _predict_tp_for_pac(history_df, min_l_h, pipeline, booster2, features2)
+        checked += 1
+        if tp_at_min <= target_tp:
+            # 最小加药量已满足目标
+            detail = {
+                "model_id": model["id"], "version": model["name"], "target_tp": target_tp,
+                "current_tp": round(current_tp, 4), "checked_candidates": checked,
+                "target_met": True, "optimized_pac_l_h": round(min_l_h, 2),
+                "predicted_tp": round(tp_at_min, 4),
+            }
+            return min_l_h, tp_at_min, detail, None
+
+        tp_at_max = _predict_tp_for_pac(history_df, max_l_h, pipeline, booster2, features2)
+        checked += 1
+        if tp_at_max > target_tp:
+            # 即使最大加药量也无法达标
+            detail = {
+                "model_id": model["id"], "version": model["name"], "target_tp": target_tp,
+                "current_tp": round(current_tp, 4), "checked_candidates": checked,
+                "target_met": False, "fallback_reason": "即使最大加药量也无法达到目标TP",
+            }
+            return None, None, detail, detail["fallback_reason"]
+
+        # 二分搜索：PAC 越多 TP 越低，单调递减
+        lo = min_l_h
+        hi = max_l_h
+        best_pac = max_l_h
+        best_tp = tp_at_max
+        for _ in range(20):  # 最多20次迭代，精度约 0.001 L/h
+            mid = round((lo + hi) / 2, 3)
+            if mid <= lo or mid >= hi:
+                break
+            tp_mid = _predict_tp_for_pac(history_df, mid, pipeline, booster2, features2)
+            checked += 1
+            if tp_mid <= target_tp:
+                # mid 满足条件，尝试更小的PAC
+                best_pac = mid
+                best_tp = tp_mid
+                hi = mid
+            else:
+                # mid 不满足，需要更大的PAC
+                lo = mid
+
+        detail = {
+            "model_id": model["id"],
+            "version": model["name"],
+            "target_tp": target_tp,
+            "current_tp": round(current_tp, 4),
+            "checked_candidates": checked,
+            "target_met": True,
+            "optimized_pac_l_h": round(best_pac, 2),
+            "predicted_tp": round(best_tp, 4),
+        }
+        return best_pac, best_tp, detail, None
+
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return None, None, None, f"优化计算异常: {exc}"
+
+
 def model_feature_row(artifact: dict[str, Any], data: dict[str, DataPoint], extra: dict[str, float] | None = None) -> tuple[list[float], dict[str, float | None]]:
     extra = extra or {}
     row: list[float] = []
@@ -403,10 +672,12 @@ def calculate_for_point(
     if not valid_for_calc(q) or not valid_for_calc(tp_out):
         final = clamp(hold_value, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
         reasons.append("出水TP或进水流量实时数据异常，保留上次计算结果")
-        upsert_alarm(con, severity="high", title=f"{point['name']} 关键实时数据异常", category="data", message="出水TP或进水流量不是实时正常数据。", dosing_point_id=dosing_point_id, event_time=now.isoformat())
+        if save:
+            upsert_alarm(con, severity="high", title=f"{point['name']} 关键实时数据异常", category="data", message="出水TP或进水流量不是实时正常数据。", dosing_point_id=dosing_point_id, event_time=now.isoformat())
         return _persist_and_pack(con, dosing_point_id, now, point, data, "abnormal", "bad", final, final, final, final, reasons, None, tp_forecast, save, source, control)
 
-    clear_alarm(con, title=f"{point['name']} 关键实时数据异常", category="data", dosing_point_id=dosing_point_id)
+    if save:
+        clear_alarm(con, title=f"{point['name']} 关键实时数据异常", category="data", dosing_point_id=dosing_point_id)
     q_value = float(q.value or 0)
     current_tp_value = float(tp_out.value or 0)
 
@@ -419,25 +690,54 @@ def calculate_for_point(
     raw = base
     mode = "conservative"
     ai_detail: dict[str, Any] | None = None
-    pac_model = active_model(con, dosing_point_id, "pac_flow_predict") if ai_enabled else None
-    if pac_model:
-        target_tp_value = float(control["tp_target_mg_l"])
-        predicted_pac, detail, error = predict_pac_flow_model(pac_model, data, {"TP_OUT": target_tp_value})
-        if predicted_pac is not None:
-            raw = predicted_pac
-            mode = "normal"
-            ai_detail = detail
-            reasons.append(f"正常模式：投用加药流量预测模型 {pac_model['name']}，将模型输入中的出水TP由当前值 {current_tp_value:.4g} mg/L 替换为目标TP {target_tp_value:.4g} mg/L，预测目标TP对应加药流量 {predicted_pac:.4g} L/h")
+
+    # 优先检查双任务模型
+    dual_model_row = dual_task_model(con, dosing_point_id) if ai_enabled else None
+    if dual_model_row:
+        history_df = fetch_history_for_dual_model(con, dosing_point_id, now)
+        if history_df is not None and len(history_df) >= 36:
+            predicted_pac, predicted_next_tp, detail, error = predict_dual_task_model(dual_model_row, history_df)
+            if predicted_pac is not None:
+                raw = predicted_pac
+                mode = "dual_task_ai"
+                ai_detail = detail
+                reasons.append(f"双任务AI模式：投用模型 {dual_model_row['name']}，PAC预测 {predicted_pac:.4g} L/h，下次出水TP预测 {predicted_next_tp:.4g} mg/L")
+                # 构造tp_forecast
+                tp_forecast = {
+                    "model_id": dual_model_row["id"],
+                    "model_name": dual_model_row["name"],
+                    "predicted_tp_out": round(predicted_next_tp, 4) if predicted_next_tp is not None else None,
+                    "target_label": "下次出水TP预测",
+                    "detail": detail,
+                }
+            else:
+                reasons.append(error or "双任务模型推理失败，回退保守模式")
         else:
-            reasons.append(error or "加药流量预测模型不可用，回退保守模式")
+            reasons.append("双任务模型历史数据不足，回退保守模式")
     else:
-        reasons.append("无投用加药流量预测模型，使用保守模式纯计算")
+        # 原有单任务模型逻辑
+        pac_model = active_model(con, dosing_point_id, "pac_flow_predict") if ai_enabled else None
+        if pac_model:
+            target_tp_value = float(control["tp_target_mg_l"])
+            predicted_pac, detail, error = predict_pac_flow_model(pac_model, data, {"TP_OUT": target_tp_value})
+            if predicted_pac is not None:
+                raw = predicted_pac
+                mode = "normal"
+                ai_detail = detail
+                reasons.append(f"正常模式：投用加药流量预测模型 {pac_model['name']}，将模型输入中的出水TP由当前值 {current_tp_value:.4g} mg/L 替换为目标TP {target_tp_value:.4g} mg/L，预测目标TP对应加药流量 {predicted_pac:.4g} L/h")
+            else:
+                reasons.append(error or "加药流量预测模型不可用，回退保守模式")
+        else:
+            reasons.append("无投用加药流量预测模型，使用保守模式纯计算")
+
     if mode == "conservative" and current_tp_value > float(control["tp_upper_mg_l"]):
         final = float(control["pac_max_l_h"])
         reasons.append("实时出水TP高于上限，直接输出最大加药流量")
-        upsert_alarm(con, severity="high", title=f"{point['name']} 出水TP高于上限", category="data", message=f"实时出水TP {current_tp_value:.4g} mg/L 高于上限 {float(control['tp_upper_mg_l']):.4g} mg/L。", dosing_point_id=dosing_point_id, event_time=now.isoformat())
+        if save:
+            upsert_alarm(con, severity="high", title=f"{point['name']} 出水TP高于上限", category="data", message=f"实时出水TP {current_tp_value:.4g} mg/L 高于上限 {float(control['tp_upper_mg_l']):.4g} mg/L。", dosing_point_id=dosing_point_id, event_time=now.isoformat())
         return _persist_and_pack(con, dosing_point_id, now, point, data, "conservative", "good", final, final, final, final, reasons, None, tp_forecast, save, source, control)
-    clear_alarm(con, title=f"{point['name']} 出水TP高于上限", category="data", dosing_point_id=dosing_point_id)
+    if save:
+        clear_alarm(con, title=f"{point['name']} 出水TP高于上限", category="data", dosing_point_id=dosing_point_id)
 
     limited = clamp(raw, float(control["pac_min_l_h"]), float(control["pac_max_l_h"]))
     final = limited
@@ -668,6 +968,46 @@ def write_virtual_point_samples(
             )
 
 
+def _pack_cached_recommendation(con: sqlite3.Connection, point_id: int, now: datetime) -> dict[str, Any] | None:
+    """直接从数据库读取上次推荐结果（不重新计算），用于 dashboard 缓存命中"""
+    row = con.execute(
+        """
+        SELECT r.*, dp.name AS dosing_point_name, pl.name AS process_line_name,
+               re.explanation_json
+        FROM recommendations r
+        JOIN dosing_points dp ON dp.id=r.dosing_point_id
+        JOIN process_lines pl ON pl.id=dp.process_line_id
+        LEFT JOIN recommendation_explanations re ON re.recommendation_id=r.id
+        WHERE r.dosing_point_id=? AND r.source='online'
+        ORDER BY r.recommend_time DESC
+        LIMIT 1
+        """,
+        (point_id,),
+    ).fetchone()
+    if not row:
+        return None
+    explanation = loads_json(row["explanation_json"] or "{}", {})
+    # 使用 latest_data_for_point 获取逻辑类型映射的数据（与 calculate_for_point 一致）
+    data = latest_data_for_point(con, point_id, now)
+    return {
+        "id": row["id"],
+        "dosing_point_id": point_id,
+        "dosing_point_name": row["dosing_point_name"],
+        "process_line_name": row["process_line_name"],
+        "recommend_time": row["recommend_time"],
+        "mode": row["mode"],
+        "quality": row["quality"],
+        "base_l_h": round(float(row["base_l_h"] or 0), 2),
+        "raw_l_h": round(float(row["raw_l_h"] or 0), 2),
+        "limited_l_h": round(float(row["limited_l_h"] or 0), 2),
+        "final_l_h": round(float(row["final_l_h"] or 0), 2),
+        "reasons": explanation.get("reason", []),
+        "tp_lag_avg": None,
+        "tp_forecast": explanation.get("tp_forecast"),
+        "data": data,
+    }
+
+
 def recalculate_all(con: sqlite3.Connection) -> list[dict[str, Any]]:
     now = datetime.now().replace(second=0, microsecond=0)
     rows = con.execute(
@@ -697,7 +1037,9 @@ def recalculate_all(con: sqlite3.Connection) -> list[dict[str, Any]]:
         ).fetchone()
         latest_time = parse_dt(latest["recommend_time"]) if latest else None
         if latest_time and (now - latest_time).total_seconds() < interval:
-            result.append(calculate_for_point(con, point_id, now=latest_time, save=False))
-        else:
-            result.append(calculate_for_point(con, point_id, now=now, save=True))
+            cached = _pack_cached_recommendation(con, point_id, now)
+            if cached:
+                result.append(cached)
+                continue
+        result.append(calculate_for_point(con, point_id, now=now, save=True))
     return result

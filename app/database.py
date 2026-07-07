@@ -52,11 +52,12 @@ def loads_json(value: str | None, default: Any = None) -> Any:
 
 def get_connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10.0)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode = WAL")
     con.execute("PRAGMA synchronous = NORMAL")
     con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA busy_timeout = 10000")
     return con
 
 
@@ -421,6 +422,7 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             "bio_do2_tag_id": "INTEGER",
             "tp_model_id": "INTEGER",
             "pac_flow_model_id": "INTEGER",
+            "dual_model_id": "INTEGER",
             "source_configured": "INTEGER NOT NULL DEFAULT 0",
             "chemical_group_id": "INTEGER",
             "process_parameter_group_id": "INTEGER",
@@ -591,6 +593,7 @@ def backfill_point_model_selections(con: sqlite3.Connection) -> None:
     for target_column, kind in (
         ("tp_model_id", "tp_out_response"),
         ("pac_flow_model_id", "pac_flow_predict"),
+        ("dual_model_id", "ai_pac_dual_task"),
     ):
         con.execute(
             f"""

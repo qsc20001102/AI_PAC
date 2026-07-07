@@ -59,6 +59,7 @@ const modeText = {
   stale: "延迟",
   degraded: "降级",
   abnormal: "异常",
+  dual_task_ai: "正常",
 };
 
 const seriesStyle = {
@@ -120,3 +121,6 @@ const processSourceFields = [
   ["bio_mlss1_tag_id", "生化池MLSS1来源"],
   ["bio_mlss2_tag_id", "生化池MLSS2来源"],
 ];
+
+// 兼容旧版 data.js 中可能引用的函数（防止缓存导致的 ReferenceError）
+window.refreshOverviewDataQuality = function() {};

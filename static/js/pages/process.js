@@ -51,6 +51,7 @@ async function renderProcess(main) {
               ${selectField("process_parameter_group_id", "工艺参数组", [{ value: "", label: "无" }, ...processParameterGroups.map((group) => ({ value: String(group.id), label: group.name }))], p.process_parameter_group_id == null ? "" : String(p.process_parameter_group_id))}
               ${selectField("tp_model_id", "出水TP预测模型", modelSelectOptions(trainedModels, "tp_out_response"), p.tp_model_id == null ? "" : String(p.tp_model_id))}
               ${selectField("pac_flow_model_id", "加药流量预测模型", modelSelectOptions(trainedModels, "pac_flow_predict"), p.pac_flow_model_id == null ? "" : String(p.pac_flow_model_id))}
+              ${selectField("dual_model_id", "智能双任务预测模型", modelSelectOptions(trainedModels, "ai_pac_dual_task"), p.dual_model_id == null ? "" : String(p.dual_model_id))}
             </div>
             <div class="process-source-title">数据来源配置</div>
             <div class="form-grid process-source-grid">
@@ -461,6 +462,7 @@ function defaultNewPoint() {
     bio_mlss2_tag_id: null,
     tp_model_id: null,
     pac_flow_model_id: null,
+    dual_model_id: null,
     process_parameter_group_id: null,
     source_tags: [],
     display_order: next,
@@ -507,6 +509,7 @@ function pointFormPayload(form) {
   });
   payload.tp_model_id = payload.tp_model_id == null ? null : Number(payload.tp_model_id);
   payload.pac_flow_model_id = payload.pac_flow_model_id == null ? null : Number(payload.pac_flow_model_id);
+  payload.dual_model_id = payload.dual_model_id == null ? null : Number(payload.dual_model_id);
   payload.process_parameter_group_id = payload.process_parameter_group_id == null ? null : Number(payload.process_parameter_group_id);
   return payload;
 }

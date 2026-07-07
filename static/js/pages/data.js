@@ -165,7 +165,6 @@ function updateCollectionRealtimeCells(tags) {
 
 async function refreshCollectionRealtime() {
   if (state.activePage === "overview") {
-    await refreshOverviewDataQuality();
     return;
   }
   if (state.activePage !== "data" || !document.querySelector(".collection-table")) return;

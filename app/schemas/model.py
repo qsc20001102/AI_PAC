@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-ModelKind = Literal["tp_out_response", "pac_flow_predict"]
+ModelKind = Literal["tp_out_response", "pac_flow_predict", "ai_pac_dual_task"]
 
 
 class ModelProjectCreate(BaseModel):

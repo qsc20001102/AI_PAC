@@ -74,11 +74,8 @@ async function renderModels(main) {
   if (!selected || state.editingNewModel) return;
 
   try {
-    const query = new URLSearchParams();
-    if (state.modelSampleStart) query.set("start", state.modelSampleStart);
-    if (state.modelSampleEnd) query.set("end", state.modelSampleEnd);
-    const detail = await api(`/api/models/${selected.id}${query.size ? `?${query}` : ""}`);
-    state.modelSelectedSampleIds = state.modelSelectedSampleIds.filter((id) => detail.samples.some((sample) => sample.id === id));
+    const detail = await api(`/api/models/${selected.id}?compact=1`);
+    state.modelSelectedSampleIds = [];
     const workspace = document.querySelector(".model-workspace-panel");
     if (!workspace || state.activePage !== "models" || state.selectedModelId !== selected.id) return;
     workspace.innerHTML = renderModelWorkspace(detail);
@@ -108,6 +105,7 @@ function modelDisplayStatusClass(model) {
 }
 
 function modelKindLabel(model) {
+  if (model?.model_kind === "ai_pac_dual_task") return "智能PAC双任务预测";
   return model?.model_kind === "pac_flow_predict" ? "加药流量预测" : "下次出水TP预测";
 }
 
@@ -122,6 +120,7 @@ function renderNewModelWorkspace() {
           ${selectField("model_kind", "模型类型", [
             { value: "tp_out_response", label: "下次出水TP预测" },
             { value: "pac_flow_predict", label: "加药流量预测" },
+            { value: "ai_pac_dual_task", label: "智能PAC双任务预测" },
           ], "tp_out_response")}
         </div>
         <div class="btn-row"><button class="btn primary" type="submit">创建并配置样本</button><button class="btn" id="cancelNewModelBtn" type="button">取消</button></div>
@@ -135,43 +134,52 @@ function renderModelWorkspace(detail) {
   const metrics = model.metrics || {};
   const artifact = model.artifact || {};
   const sampleTargetLabel = modelTargetLabel(model);
-  const deployHintText = model.model_kind === "pac_flow_predict"
-    ? "选择后进入正常模式：模型直接预测实际加药流量，并按工艺参数上下限限幅。"
-    : "选择后仅显示预测TP值：用于查看下一次出水TP检测数据，不直接替代加药流量推荐。";
+  const deployHintText = model.model_kind === "ai_pac_dual_task"
+    ? "选择后进入双任务AI模式：模型同时预测PAC加药流量和下次出水TP变化量，并自动计算推荐加药流量。"
+    : (model.model_kind === "pac_flow_predict"
+      ? "选择后进入正常模式：模型直接预测实际加药流量，并按工艺参数上下限限幅。"
+      : "选择后仅显示预测TP值：用于查看下一次出水TP检测数据，不直接替代加药流量推荐。");
+  const trainMetricsHtml = model.model_kind === "ai_pac_dual_task"
+    ? (model.trained_at
+      ? `<div class="model-metrics">
+          <span>LightGBM 双任务</span>
+          <span>任务1样本 ${metrics.task1?.samples ?? 0}</span>
+          <span>任务1特征 ${metrics.task1?.feature_count ?? 0}</span>
+          <span>任务2样本 ${metrics.task2?.samples ?? 0}</span>
+          <span>任务2特征 ${metrics.task2?.feature_count ?? 0}</span>
+        </div>
+        ${renderDualTaskEvalMetrics(metrics)}`
+      : '<div class="muted">样本数达到 40 条后可开始双任务 LightGBM 训练。</div>')
+    : (model.trained_at
+      ? `<div class="model-metrics"><span>LightGBM</span><span>训练样本 ${metrics.samples ?? 0}</span><span>R² ${fmtCompact(metrics.R2, 4)}</span><span>MAE ${fmtCompact(metrics.MAE, 4)}</span><span>有效特征 ${metrics.feature_count ?? 0}</span><span>${htmlEscape(artifact.file_name || "模型文件已生成")}</span></div>`
+      : '<div class="muted">样本数达到 2 条且覆盖变化工况后可开始 LightGBM 训练。</div>');
   return `
     <div class="panel-header">
       <div><div class="panel-title">${htmlEscape(model.name)}</div><div class="muted">类型：${modelKindLabel(model)}　状态：<span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span></div></div>
       <button class="btn" id="deleteModelBtn" type="button">删除模型</button>
     </div>
-    <div class="panel-body model-workspace-body">
+    <div class="panel-body model-workspace-body" style="align-content:start;">
       ${renderModelTrainingConfig(model, columns)}
 
-      <section class="model-step model-sample-step">
-        <div class="model-step-title"><span>2</span><div>导入训练样本</div><small>展示 ${samples.length} / ${model.sample_count || 0} 条</small></div>
+      <section class="model-step model-sample-step" style="align-self:start;">
+        <div class="model-step-title"><span>2</span><div>导入训练样本</div></div>
         <div class="model-step-actions">
           <button class="btn ghost" id="refreshModelSamplesBtn" type="button">刷新样本</button>
           <button class="btn ghost" id="exportModelSamplesBtn" type="button">导出 CSV</button>
+          ${model.model_kind === "ai_pac_dual_task" && model.sample_count ? '<button class="btn ghost" id="exportModelFeaturesBtn" type="button">导出处理后特征</button>' : ""}
           <label class="btn primary file-button" for="modelCsvInput">导入 CSV</label><input id="modelCsvInput" type="file" accept=".csv,text/csv" hidden>
+          <button class="btn danger" id="clearAllModelSamplesBtn" type="button" ${model.sample_count ? "" : "disabled"}>清空全部样本</button>
         </div>
-        <div class="muted model-sampling-note">${htmlEscape(modelKindLabel(model))}使用${htmlEscape(sampleTargetLabel)}作为标签，标签不会进入输入特征。</div>
-        <div class="model-sample-query">
-          <label>开始时间<input id="modelSampleStart" type="datetime-local" value="${htmlEscape(state.modelSampleStart || "")}"></label>
-          <label>结束时间<input id="modelSampleEnd" type="datetime-local" value="${htmlEscape(state.modelSampleEnd || "")}"></label>
-          <button class="btn ghost" id="queryModelSamplesBtn" type="button">查询</button>
-          <button class="btn" id="resetModelSampleQueryBtn" type="button">重置</button>
-          <button class="btn ghost" id="deleteSelectedModelSamplesBtn" type="button" ${state.modelSelectedSampleIds.length ? "" : "disabled"}>删除已选（${state.modelSelectedSampleIds.length}）</button>
-          <button class="btn danger" id="clearAllModelSamplesBtn" type="button" ${model.sample_count ? "" : "disabled"}>清空全部</button>
-        </div>
-        ${renderModelSampleTable(columns, samples, sampleTargetLabel)}
+        <div class="muted model-sampling-note">已导入 <strong>${model.sample_count || 0}</strong> 条训练样本。${model.model_kind === "ai_pac_dual_task" ? "使用13个原始传感器字段，系统自动完成特征工程（滞后、滚动窗口、差分等）。" : ""}</div>
       </section>
 
-      <section class="model-step">
+      <section class="model-step" style="align-self:start;">
         <div class="model-step-title"><span>3</span><div>训练模型</div><small>${model.trained_at ? `最近训练：${dateMinute(model.trained_at)}` : "尚未训练"}</small></div>
-        <div class="model-step-actions"><button class="btn primary" id="trainModelBtn" type="button" ${samples.length < 2 ? "disabled" : ""}>开始训练</button>${model.trained_at ? '<button class="btn ghost" id="downloadModelArtifactBtn" type="button">下载模型文件</button>' : ""}</div>
-        ${model.trained_at ? `<div class="model-metrics"><span>LightGBM</span><span>训练样本 ${metrics.samples ?? 0}</span><span>R² ${fmtCompact(metrics.R2, 4)}</span><span>MAE ${fmtCompact(metrics.MAE, 4)}</span><span>有效特征 ${metrics.feature_count ?? 0}</span><span>${htmlEscape(artifact.file_name || "模型文件已生成")}</span></div>` : '<div class="muted">样本数达到 2 条且覆盖变化工况后可开始 LightGBM 训练。</div>'}
+        <div class="model-step-actions"><button class="btn primary" id="trainModelBtn" type="button" ${(model.sample_count || 0) < (model.model_kind === "ai_pac_dual_task" ? 40 : 2) ? "disabled" : ""}>开始训练</button>${model.trained_at ? '<button class="btn ghost" id="downloadModelArtifactBtn" type="button">下载模型文件</button>' : ""}</div>
+        ${trainMetricsHtml}
       </section>
 
-      <section class="model-step">
+      <section class="model-step" style="align-self:start;">
         <div class="model-step-title"><span>4</span><div>使用配置</div><small>在工艺配置中选择</small></div>
         <div class="muted">${deployHintText} 已训练模型可在工艺配置的投加点配置中选择；也可以选择“无”表示不投用模型。</div>
       </section>
@@ -181,8 +189,11 @@ function renderModelWorkspace(detail) {
 
 function renderModelTrainingConfig(model, columns) {
   const config = modelTrainingConfig(model, columns);
+  if (config.is_dual_task) {
+    return renderDualTaskTrainingConfig(model, config);
+  }
   return `
-    <section class="model-step model-config-step">
+    <section class="model-step model-config-step" style="align-self:start;">
       <form id="modelConfigForm">
         <div class="model-step-title"><span>1</span><div>模型参数配置</div><small>${htmlEscape(modelTargetLabel(model))}</small></div>
         <div class="model-config-name-row">
@@ -336,6 +347,70 @@ function renderModelTrainingConfig(model, columns) {
   `;
 }
 
+function renderDualTaskTrainingConfig(model, config) {
+  const taskFields = (prefix, task) => `
+    <div class="model-param-grid">
+      ${modelNumberField(`${prefix}_num_leaves`, task.num_leaves, 2, 255, "1", model)}
+      ${modelNumberField(`${prefix}_max_depth`, task.max_depth, -1, 32, "1", model)}
+      ${modelNumberField(`${prefix}_min_data_in_leaf`, task.min_data_in_leaf, 1, 10000, "1", model)}
+      ${modelNumberField(`${prefix}_min_sum_hessian_in_leaf`, task.min_sum_hessian_in_leaf, 0, 10, "0.001", model)}
+      ${modelNumberField(`${prefix}_learning_rate`, task.learning_rate, 0.001, 1, "0.001", model)}
+      ${modelNumberField(`${prefix}_feature_fraction`, task.feature_fraction, 0.1, 1, "0.01", model)}
+      ${modelNumberField(`${prefix}_bagging_fraction`, task.bagging_fraction, 0.1, 1, "0.01", model)}
+      ${modelNumberField(`${prefix}_bagging_freq`, task.bagging_freq, 0, 100, "1", model)}
+      ${modelNumberField(`${prefix}_lambda_l1`, task.lambda_l1, 0, 1000, "0.1", model)}
+      ${modelNumberField(`${prefix}_lambda_l2`, task.lambda_l2, 0, 1000, "0.1", model)}
+      ${modelNumberField(`${prefix}_num_boost_round`, task.num_boost_round, 10, 5000, "1", model)}
+      ${modelNumberField(`${prefix}_early_stopping_rounds`, task.early_stopping_rounds, 0, 500, "1", model)}
+    </div>
+  `;
+  return `
+    <section class="model-step model-config-step" style="align-self:start;">
+      <form id="modelConfigForm">
+        <div class="model-step-title"><span>1</span><div>模型参数配置</div><small>智能PAC双任务预测（特征工程自动完成）</small></div>
+        <div class="model-config-name-row">
+          ${field("name", "模型名称", model.name, "text")}
+        </div>
+
+        <div class="model-param-group expanded" data-model-group>
+          <div class="model-param-group-header">数据切分</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-param-grid">
+              ${modelNumberField("train_ratio", config.train_ratio, 0.1, 0.9, "0.01", model)}
+              ${modelNumberField("val_ratio", config.val_ratio, 0.05, 0.5, "0.01", model)}
+            </div>
+          </div></div>
+        </div>
+
+        <div class="model-param-group expanded" data-model-group>
+          <div class="model-param-group-header">任务1：PAC加药量预测</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            ${taskFields("task1", config.task1)}
+          </div></div>
+        </div>
+
+        <div class="model-param-group expanded" data-model-group>
+          <div class="model-param-group-header">任务2：出水TP变化量预测</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            ${taskFields("task2", config.task2)}
+          </div></div>
+        </div>
+
+        <div class="model-param-group" data-model-group>
+          <div class="model-param-group-header">随机种子</div>
+          <div class="model-param-group-body"><div class="model-param-group-body-inner">
+            <div class="model-param-grid">
+              ${modelNumberField("seed", config.seed, 0, 999999, "1", model)}
+            </div>
+          </div></div>
+        </div>
+
+        <div class="btn-row"><button class="btn ghost" type="submit">保存模型参数</button><span class="muted">模型不绑定投加点；训练完成后到工艺配置中按投加点选择使用。</span></div>
+      </form>
+    </section>
+  `;
+}
+
 function modelNumberField(name, value, min, max, step, model) {
   const minAttr = min == null ? "" : ` min="${htmlEscape(min)}"`;
   const maxAttr = max == null ? "" : ` max="${htmlEscape(max)}"`;
@@ -420,13 +495,75 @@ function modelParamHelp(name, model) {
   return helps[name] || "";
 }
 
+function renderDualTaskEvalMetrics(metrics) {
+  const t1 = metrics?.task1?.eval || {};
+  const t2 = metrics?.task2?.eval || {};
+  if (!Object.keys(t1).length && !Object.keys(t2).length) return "";
+  const fmt = (v) => v == null ? "—" : fmtCompact(v, 4);
+  const row = (label, data) => {
+    const train = data?.train || {};
+    const val = data?.val || {};
+    const test = data?.test || {};
+    if (data?.train?.delta) {
+      // task2 有 delta/abs 双层结构
+      const dTrain = train.delta || {};
+      const dVal = val.delta || {};
+      const dTest = test.delta || {};
+      const aTrain = train.abs || {};
+      const aVal = val.abs || {};
+      const aTest = test.abs || {};
+      return `<tr><td>${label}(delta)</td><td>${fmt(dTrain.rmse)}</td><td>${fmt(dTrain.mae)}</td><td>${fmt(dTrain.r2)}</td><td>—</td><td>${fmt(dVal.rmse)}</td><td>${fmt(dVal.mae)}</td><td>${fmt(dVal.r2)}</td><td>—</td><td>${fmt(dTest.rmse)}</td><td>${fmt(dTest.mae)}</td><td>${fmt(dTest.r2)}</td><td>—</td></tr>
+              <tr><td>${label}(绝对TP)</td><td>${fmt(aTrain.rmse)}</td><td>${fmt(aTrain.mae)}</td><td>—</td><td>${fmt(aTrain.mape)}%</td><td>${fmt(aVal.rmse)}</td><td>${fmt(aVal.mae)}</td><td>—</td><td>${fmt(aVal.mape)}%</td><td>${fmt(aTest.rmse)}</td><td>${fmt(aTest.mae)}</td><td>—</td><td>${fmt(aTest.mape)}%</td></tr>`;
+    }
+    return `<tr><td>${label}</td><td>${fmt(train.rmse)}</td><td>${fmt(train.mae)}</td><td>${fmt(train.r2)}</td><td>${fmt(train.mape)}%</td><td>${fmt(val.rmse)}</td><td>${fmt(val.mae)}</td><td>${fmt(val.r2)}</td><td>${fmt(val.mape)}%</td><td>${fmt(test.rmse)}</td><td>${fmt(test.mae)}</td><td>${fmt(test.r2)}</td><td>${fmt(test.mape)}%</td></tr>`;
+  };
+  return `
+    <div class="model-eval-table-wrap">
+      <table class="table model-eval-table">
+        <thead><tr><th>任务</th><th colspan="4">训练集</th><th colspan="4">验证集</th><th colspan="4">测试集</th></tr>
+        <tr><th></th><th>RMSE</th><th>MAE</th><th>R²</th><th>MAPE</th><th>RMSE</th><th>MAE</th><th>R²</th><th>MAPE</th><th>RMSE</th><th>MAE</th><th>R²</th><th>MAPE</th></tr></thead>
+        <tbody>${row("任务1：PAC加药量", t1)}${row("任务2：出水TP", t2)}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 function modelTrainingTargetKey(model) {
   return model?.model_kind === "pac_flow_predict" ? "_training_target_pac_actual" : "_training_target_tp_out_next";
 }
 
 function modelTrainingConfig(model, columns) {
-  const keys = columns.map((column) => column.key);
   const raw = model.training_config || {};
+  if (model?.model_kind === "ai_pac_dual_task") {
+    const taskDefaults = {
+      num_leaves: 31, max_depth: 6, min_data_in_leaf: 50, min_sum_hessian_in_leaf: 0.001,
+      learning_rate: 0.05, feature_fraction: 0.8, bagging_fraction: 0.8, bagging_freq: 5,
+      lambda_l1: 0.1, lambda_l2: 1.0, num_boost_round: 2000, early_stopping_rounds: 100,
+    };
+    const makeTask = (t) => ({
+      num_leaves: raw[t]?.num_leaves ?? taskDefaults.num_leaves,
+      max_depth: raw[t]?.max_depth ?? taskDefaults.max_depth,
+      min_data_in_leaf: raw[t]?.min_data_in_leaf ?? taskDefaults.min_data_in_leaf,
+      min_sum_hessian_in_leaf: raw[t]?.min_sum_hessian_in_leaf ?? taskDefaults.min_sum_hessian_in_leaf,
+      learning_rate: raw[t]?.learning_rate ?? taskDefaults.learning_rate,
+      feature_fraction: raw[t]?.feature_fraction ?? taskDefaults.feature_fraction,
+      bagging_fraction: raw[t]?.bagging_fraction ?? taskDefaults.bagging_fraction,
+      bagging_freq: raw[t]?.bagging_freq ?? taskDefaults.bagging_freq,
+      lambda_l1: raw[t]?.lambda_l1 ?? taskDefaults.lambda_l1,
+      lambda_l2: raw[t]?.lambda_l2 ?? taskDefaults.lambda_l2,
+      num_boost_round: raw[t]?.num_boost_round ?? taskDefaults.num_boost_round,
+      early_stopping_rounds: raw[t]?.early_stopping_rounds ?? taskDefaults.early_stopping_rounds,
+    });
+    return {
+      is_dual_task: true,
+      task1: makeTask("task1"),
+      task2: makeTask("task2"),
+      train_ratio: raw.split?.train_ratio ?? 0.7,
+      val_ratio: raw.split?.val_ratio ?? 0.15,
+      seed: raw.seed ?? 42,
+    };
+  }
+  const keys = columns.map((column) => column.key);
   const featureColumns = Array.isArray(raw.feature_columns) ? raw.feature_columns.filter((key) => keys.includes(key)) : keys;
   const rawConstraints = raw.monotone_constraints && typeof raw.monotone_constraints === "object" ? raw.monotone_constraints : {};
   const constraints = Object.fromEntries(keys.map((key) => [key, [-1, 0, 1].includes(Number(rawConstraints[key])) ? Number(rawConstraints[key]) : 0]));
@@ -472,6 +609,21 @@ function modelTrainingConfig(model, columns) {
 function modelProjectPayload(form, model, columns) {
   const payload = formObject(form);
   payload.name = String(payload.name || "").trim();
+  if (model?.model_kind === "ai_pac_dual_task") {
+    const taskKeys = ["num_leaves", "max_depth", "min_data_in_leaf", "min_sum_hessian_in_leaf",
+      "learning_rate", "feature_fraction", "bagging_fraction", "bagging_freq",
+      "lambda_l1", "lambda_l2", "num_boost_round", "early_stopping_rounds"];
+    const makeTask = (prefix) => Object.fromEntries(taskKeys.map((k) => [k, Number(payload[`${prefix}_${k}`])]));
+    payload.training_config = {
+      task1: makeTask("task1"),
+      task2: makeTask("task2"),
+      split: { train_ratio: Number(payload.train_ratio), val_ratio: Number(payload.val_ratio) },
+      seed: Number(payload.seed),
+    };
+    taskKeys.forEach((k) => { delete payload[`task1_${k}`]; delete payload[`task2_${k}`]; });
+    ["train_ratio", "val_ratio", "seed"].forEach((k) => { delete payload[k]; });
+    return payload;
+  }
   const featureColumns = [...form.querySelectorAll("[data-model-feature-column]:checked")].map((node) => node.dataset.modelFeatureColumn);
   if (!featureColumns.length) return null;
   const monotoneConstraints = {};
@@ -588,47 +740,19 @@ function wireModelWorkspace(detail) {
   document.getElementById("deleteModelBtn")?.addEventListener("click", () => deleteModelProject(model));
   document.getElementById("refreshModelSamplesBtn")?.addEventListener("click", async () => { await renderPage(); });
   document.getElementById("exportModelSamplesBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/samples.csv`; });
+  document.getElementById("exportModelFeaturesBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/features.csv`; });
   document.getElementById("modelCsvInput")?.addEventListener("change", (event) => importModelSamples(model.id, event));
   document.getElementById("trainModelBtn")?.addEventListener("click", () => trainModelProject(model.id));
   document.getElementById("downloadModelArtifactBtn")?.addEventListener("click", () => { window.location.href = `/api/models/${model.id}/artifact`; });
-  document.querySelectorAll("[data-model-sample-delete]").forEach((button) => button.addEventListener("click", () => deleteModelSample(model.id, Number(button.dataset.modelSampleDelete))));
-  document.getElementById("queryModelSamplesBtn")?.addEventListener("click", async () => {
-    state.modelSampleStart = document.getElementById("modelSampleStart")?.value || null;
-    state.modelSampleEnd = document.getElementById("modelSampleEnd")?.value || null;
-    state.modelSelectedSampleIds = [];
-    await renderPage();
-  });
-  document.getElementById("resetModelSampleQueryBtn")?.addEventListener("click", async () => {
-    state.modelSampleStart = null;
-    state.modelSampleEnd = null;
-    state.modelSelectedSampleIds = [];
-    await renderPage();
-  });
-  document.getElementById("selectAllModelSamples")?.addEventListener("change", (event) => {
-    state.modelSelectedSampleIds = event.target.checked ? detail.samples.map((sample) => sample.id) : [];
-    updateModelSampleSelectionAction();
-  });
-  document.querySelectorAll("[data-model-sample-select]").forEach((input) => input.addEventListener("change", () => {
-    state.modelSelectedSampleIds = [...document.querySelectorAll("[data-model-sample-select]:checked")].map((node) => Number(node.dataset.modelSampleSelect));
-    updateModelSampleSelectionAction();
-  }));
-  document.getElementById("deleteSelectedModelSamplesBtn")?.addEventListener("click", () => deleteSelectedModelSamples(model.id));
   document.getElementById("clearAllModelSamplesBtn")?.addEventListener("click", () => clearAllModelSamples(model.id, model.sample_count));
-}
-
-function updateModelSampleSelectionAction() {
-  const button = document.getElementById("deleteSelectedModelSamplesBtn");
-  if (!button) return;
-  const count = state.modelSelectedSampleIds.length;
-  button.disabled = count === 0;
-  button.textContent = `删除已选（${count}）`;
 }
 
 async function createModelProject(event) {
   event.preventDefault();
   const payload = formObject(event.currentTarget);
   payload.name = String(payload.name || "").trim();
-  payload.model_kind = payload.model_kind === "pac_flow_predict" ? "pac_flow_predict" : "tp_out_response";
+  const validKinds = ["tp_out_response", "pac_flow_predict", "ai_pac_dual_task"];
+  if (!validKinds.includes(payload.model_kind)) payload.model_kind = "tp_out_response";
   try {
     const res = await api("/api/models", { method: "POST", body: JSON.stringify(payload) });
     state.selectedModelId = res.model.id;

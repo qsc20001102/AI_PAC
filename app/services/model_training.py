@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from app.api.common import row_to_dict
 from app.database import db_session, dumps_json, loads_json, utc_now_iso
 from app.schemas import ModelSampleImportIn
-
+from app.services import wwtp_ai_engine
 
 
 MODEL_SAMPLE_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk")
@@ -28,7 +28,8 @@ MODEL_SAMPLE_TIME_FORMATS = (
 )
 MODEL_KIND_TP_OUT_RESPONSE = "tp_out_response"
 MODEL_KIND_PAC_FLOW_PREDICT = "pac_flow_predict"
-SUPPORTED_MODEL_KINDS = {MODEL_KIND_TP_OUT_RESPONSE, MODEL_KIND_PAC_FLOW_PREDICT}
+MODEL_KIND_AI_PAC_DUAL_TASK = "ai_pac_dual_task"
+SUPPORTED_MODEL_KINDS = {MODEL_KIND_TP_OUT_RESPONSE, MODEL_KIND_PAC_FLOW_PREDICT, MODEL_KIND_AI_PAC_DUAL_TASK}
 TP_FORECAST_TARGET = ("TP_OUT_NEXT", "_training_target_tp_out_next", "下一次出水TP检测数据")
 PAC_FLOW_TARGET = ("PAC_ACTUAL", "_training_target_pac_actual", "实际加药流量")
 TP_FORECAST_LEGACY_TARGET_ALIASES = (
@@ -83,6 +84,8 @@ def model_kind(model) -> str:
 
 
 def default_training_config(kind: str, schema: list[dict[str, Any]]) -> dict[str, Any]:
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return wwtp_ai_engine.DEFAULT_TRAIN_CONFIG.copy()
     _target_name, target_key, _target_label = target_definition_for_kind(kind)
     feature_columns = [str(item["key"]) for item in schema]
     return {
@@ -145,6 +148,8 @@ def _config_int(value: Any, default: int, min_value: int, max_value: int) -> int
 def normalize_training_config(raw: Any, kind: str, schema: list[dict[str, Any]]) -> dict[str, Any]:
     if kind not in SUPPORTED_MODEL_KINDS:
         raise HTTPException(422, "模型类型不支持")
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return wwtp_ai_engine.normalize_training_config(raw)
     base = default_training_config(kind, schema)
     raw = raw if isinstance(raw, dict) else {}
     schema_keys = [str(item["key"]) for item in schema]
@@ -263,10 +268,39 @@ def model_sample_value(value: Any, digits: int = 6) -> float | None:
     return round(number, digits)
 
 
+DUAL_TASK_INPUT_FEATURES = [
+    ("inflow_flow", "in_flow_tag_id", "生化池A进水流量过程值", "m3/h"),
+    ("inflow_tp", "in_tp_tag_id", "进水总磷过程值", "mg/L"),
+    ("inflow_ph", "in_ph_tag_id", "进水在线PH过程值", ""),
+    ("outflow_tp", "out_tp_tag_id", "出水总磷过程值", "mg/L"),
+    ("high_density_a1_return", "reflux_flow_1_tag_id", "高密A1回流流量过程值", "m3/h"),
+    ("high_density_a2_return", "reflux_flow_2_tag_id", "高密A2回流流量过程值", "m3/h"),
+    ("orp_east_1", "bio_orp1_tag_id", "生化池A东ORP1过程值", "mV"),
+    ("orp_east_2", "bio_orp2_tag_id", "生化池A东ORP2过程值", "mV"),
+    ("orp_west_1", "bio_orp3_tag_id", "生化池A西ORP1过程值", "mV"),
+    ("orp_west_2", "bio_orp4_tag_id", "生化池A西ORP2过程值", "mV"),
+    ("mlss_east", "bio_mlss1_tag_id", "生化池A东MLSS过程值", "mg/L"),
+    ("mlss_west", "bio_mlss2_tag_id", "生化池A西MLSS过程值", "mg/L"),
+    ("pac_dosage", "pac_flow_tag_id", "PAC1加药流量过程值", "L/h"),
+]
+
+
 def default_model_feature_schema(kind: str | None = None) -> list[dict[str, Any]]:
     kind = kind or MODEL_KIND_TP_OUT_RESPONSE
     if kind not in SUPPORTED_MODEL_KINDS:
         raise HTTPException(422, "模型类型不支持")
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return [
+            {
+                "key": key,
+                "field": field_name,
+                "label": label,
+                "unit": default_unit,
+                "tag_id": None,
+                "tag_code": None,
+            }
+            for key, field_name, label, default_unit in DUAL_TASK_INPUT_FEATURES
+        ]
     return [
         {
             "key": key,
@@ -289,12 +323,32 @@ def current_model_feature_schema(con, dosing_point_id: int | None = None, kind: 
         raise HTTPException(404, "投加点不存在")
     if kind not in SUPPORTED_MODEL_KINDS:
         raise HTTPException(422, "模型类型不支持")
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return model_input_feature_schema_dual(con, point)
     return model_input_feature_schema(con, point)
 
 
 def model_input_feature_schema(con, point) -> list[dict[str, Any]]:
     schema: list[dict[str, Any]] = []
     for key, field_name, label, default_unit in MODEL_INPUT_FEATURES:
+        tag_id = point[field_name] if field_name else None
+        tag = con.execute("SELECT id,tag_code,unit FROM sensor_tags WHERE id=?", (tag_id,)).fetchone() if tag_id else None
+        schema.append(
+            {
+                "key": key,
+                "field": field_name,
+                "label": label,
+                "unit": (tag["unit"] if tag else default_unit) or default_unit,
+                "tag_id": int(tag["id"]) if tag else None,
+                "tag_code": None,
+            }
+        )
+    return schema
+
+
+def model_input_feature_schema_dual(con, point) -> list[dict[str, Any]]:
+    schema: list[dict[str, Any]] = []
+    for key, field_name, label, default_unit in DUAL_TASK_INPUT_FEATURES:
         tag_id = point[field_name] if field_name else None
         tag = con.execute("SELECT id,tag_code,unit FROM sensor_tags WHERE id=?", (tag_id,)).fetchone() if tag_id else None
         schema.append(
@@ -391,18 +445,24 @@ def parse_model_csv_sample_time(value: Any, row_number: int) -> str:
 
 
 def target_definition_for_kind(kind: str) -> tuple[str, str, str]:
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return ("DUAL_TASK", "_dual_task", "智能PAC双任务")
     if kind == MODEL_KIND_PAC_FLOW_PREDICT:
         return PAC_FLOW_TARGET
     return TP_FORECAST_TARGET
 
 
 def target_aliases_for_kind(kind: str) -> tuple[str, ...]:
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return ()
     if kind == MODEL_KIND_PAC_FLOW_PREDICT:
         return PAC_FLOW_TARGET_ALIASES
     return TP_FORECAST_LEGACY_TARGET_ALIASES
 
 
 def model_artifact_format(kind: str) -> str:
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return "ai_pac_dual_task_v1"
     if kind == MODEL_KIND_PAC_FLOW_PREDICT:
         return "ai_pac_flow_predict_v1"
     return "ai_pac_tp_forecast_v3"
@@ -424,17 +484,21 @@ def _model_csv_feature_value(row: dict[str, Any], headers: dict[str, str], item:
 
 
 def import_model_csv_samples(con, model, csv_text: str) -> dict[str, int]:
+    kind = model_kind(model)
+    if kind not in SUPPORTED_MODEL_KINDS:
+        raise HTTPException(422, "模型类型不支持")
+
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return _import_dual_task_csv_samples(con, model, csv_text)
+
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff\r\n\t ")))
     if not reader.fieldnames:
         raise HTTPException(422, "CSV 缺少表头")
-    kind = model_kind(model)
     schema = sync_model_feature_schema(con, model)
     headers = _model_csv_header_map(reader.fieldnames)
     time_header = _model_csv_time_header(headers)
     if not time_header:
         raise HTTPException(422, "CSV 必须包含“时间”列")
-    if kind not in SUPPORTED_MODEL_KINDS:
-        raise HTTPException(422, "模型类型不支持")
     target_header = _model_target_header(headers, kind)
     if not target_header:
         raise HTTPException(422, f"CSV 缺少标签列：{target_definition_for_kind(kind)[2]}")
@@ -456,8 +520,36 @@ def import_model_csv_samples(con, model, csv_text: str) -> dict[str, int]:
     return {"written": len(rows_to_insert), "generated_suggested": 0, "generated_target": 0}
 
 
+def _import_dual_task_csv_samples(con, model, csv_text: str) -> dict[str, int]:
+    """双任务模型CSV导入：使用 wwtp_ai_engine.DataImporter 进行字段映射和清洗"""
+    try:
+        df = wwtp_ai_engine.DataImporter.load_from_text(csv_text)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if len(df) < 2:
+        raise HTTPException(422, "CSV 中可导入的数据行不足")
+
+    rows_to_insert: list[tuple[int, str, dict[str, Any], float | None, float | None, str]] = []
+    for _, row in df.iterrows():
+        sample_time = row["timestamp"].replace(microsecond=0).isoformat()
+        values: dict[str, float | None] = {}
+        for col in wwtp_ai_engine.RAW_COLS:
+            if col == "timestamp":
+                continue
+            values[col] = model_sample_value(row.get(col))
+        pac_value = values.get("pac_dosage")
+        rows_to_insert.append((model["id"], sample_time, values, pac_value, None, "csv_import"))
+
+    for row in rows_to_insert:
+        insert_training_sample(con, *row)
+    con.execute("UPDATE model_projects SET updated_at=? WHERE id=?", (utc_now_iso(), model["id"]))
+    return {"written": len(rows_to_insert), "generated_suggested": 0, "generated_target": 0}
+
+
 def train_model_project_artifact(con, model) -> dict[str, Any]:
     kind = model_kind(model)
+    if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
+        return train_dual_task_artifact(con, model)
     if kind in SUPPORTED_MODEL_KINDS:
         return train_regression_artifact(con, model, kind)
     raise HTTPException(422, "模型类型不支持")
@@ -676,3 +768,118 @@ def train_lgb_regression(
     r2 = 1.0 if sst < 1e-12 else 1 - sse / sst
     mae = float(np.mean(np.abs(target - predictions)))
     return booster, {"R2": round(r2, 4), "MAE": round(mae, 4)}, params
+
+
+def train_dual_task_artifact(con, model) -> dict[str, Any]:
+    """训练双任务模型artifact：同时训练PAC预测和TP变化量预测"""
+    import tempfile
+    import shutil
+
+    raw = loads_json(model_row_value(model, "training_config_json", "{}"), {})
+    training_config = wwtp_ai_engine.normalize_training_config(raw)
+
+    # 读取所有样本
+    samples = [
+        row_to_dict(row)
+        for row in con.execute(
+            "SELECT * FROM model_training_samples WHERE model_project_id=? ORDER BY sample_time",
+            (model["id"],),
+        ).fetchall()
+    ]
+    if len(samples) < 40:
+        raise HTTPException(409, "双任务模型至少需要 40 条训练样本")
+
+    # 构建DataFrame
+    df = wwtp_ai_engine.samples_to_dataframe(samples)
+    if len(df) < 40:
+        raise HTTPException(409, "有效样本不足，请检查数据质量")
+
+    # 特征工程
+    datasets = wwtp_ai_engine.FeatureEngineer.build_features(df, for_training=True)
+    if len(datasets["task1"]) < 20 or len(datasets["task2"]) < 20:
+        raise HTTPException(409, "特征工程后可用样本不足")
+
+    # 训练
+    temp_dir = tempfile.mkdtemp(prefix="wwtp_dual_task_")
+    try:
+        trainer = wwtp_ai_engine.ModelTrainer(config=training_config)
+        result = trainer.train_both(datasets, output_dir=temp_dir)
+
+        # 读取模型字符串
+        with open(result["model1_path"], "r", encoding="utf-8") as f:
+            booster1_str = f.read()
+        with open(result["model2_path"], "r", encoding="utf-8") as f:
+            booster2_str = f.read()
+
+        # artifact
+        artifact = {
+            "format": model_artifact_format(MODEL_KIND_AI_PAC_DUAL_TASK),
+            "model_kind": MODEL_KIND_AI_PAC_DUAL_TASK,
+            "booster_models": {
+                "task1": booster1_str,
+                "task2": booster2_str,
+            },
+            "feature_names": {
+                "task1": result["model1_features"],
+                "task2": result["model2_features"],
+            },
+            "training_config": training_config,
+            "trained_at": utc_now_iso(),
+            "lightgbm_version": lgb.__version__,
+        }
+
+        metrics = {
+            "task1": {
+                "feature_count": len(result["model1_features"]),
+                "samples": len(datasets["task1"]),
+                "eval": result.get("task1_metrics", {}),
+            },
+            "task2": {
+                "feature_count": len(result["model2_features"]),
+                "samples": len(datasets["task2"]),
+                "eval": result.get("task2_metrics", {}),
+            },
+        }
+
+        now = utc_now_iso()
+        con.execute(
+            """
+            UPDATE model_projects
+            SET status='ready',recording_enabled=0,artifact_json=?,metrics_json=?,trained_at=?,updated_at=?
+            WHERE id=?
+            """,
+            (dumps_json(artifact), dumps_json(metrics), now, now, model["id"]),
+        )
+        return {"artifact": artifact, "metrics": metrics}
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def export_dual_task_features(con, model) -> bytes:
+    """导出双任务模型处理后的特征数据，返回 ZIP 字节（内含 task1_features.csv 和 task2_features.csv）"""
+    import zipfile
+    from io import BytesIO
+
+    samples = [
+        row_to_dict(row)
+        for row in con.execute(
+            "SELECT * FROM model_training_samples WHERE model_project_id=? ORDER BY sample_time",
+            (model["id"],),
+        ).fetchall()
+    ]
+    if len(samples) < 2:
+        raise HTTPException(409, "样本不足，无法导出特征")
+
+    df = wwtp_ai_engine.samples_to_dataframe(samples)
+    datasets = wwtp_ai_engine.FeatureEngineer.build_features(df, for_training=True)
+
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for task_name in ("task1", "task2"):
+            task_df = datasets.get(task_name)
+            if task_df is not None and len(task_df) > 0:
+                csv_buf = io.StringIO()
+                task_df.to_csv(csv_buf, index=False, encoding="utf-8-sig")
+                zf.writestr(f"{task_name}_features.csv", csv_buf.getvalue())
+    buf.seek(0)
+    return buf.getvalue()

@@ -1,4 +1,9 @@
 async function boot() {
+  // 清除所有可能残留的定时器（防止 bfcache 恢复旧页面状态）
+  for (let i = 1; i < 99999; i++) {
+    window.clearInterval(i);
+    window.clearTimeout(i);
+  }
   await initAuth();
   renderNav();
   renderUserArea();

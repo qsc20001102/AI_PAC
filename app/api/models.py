@@ -23,6 +23,7 @@ from app.services.model_training import (
     current_model_feature_schema,
     default_model_feature_schema,
     decode_model_sample_csv_payload,
+    export_dual_task_features,
     import_model_csv_samples,
     normalize_training_config,
     sync_model_feature_schema,
@@ -87,10 +88,11 @@ def model_project_detail_api(
     model_id: int,
     start: str | None = Query(default=None),
     end: str | None = Query(default=None),
+    compact: bool = Query(default=False),
 ) -> dict[str, Any]:
     sample_start, sample_end = validate_model_sample_range(start, end)
     with db_session() as con:
-        return model_project_detail(con, model_id, sample_start, sample_end)
+        return model_project_detail(con, model_id, sample_start, sample_end, skip_samples=compact)
 
 
 @router.put("/api/models/{model_id}")
@@ -187,13 +189,20 @@ def export_model_samples(model_id: int) -> StreamingResponse:
         detail = model_project_detail(con, model_id)
     model = detail["model"]
     schema = model.get("feature_schema", [])
+    is_dual_task = model["model_kind"] == "ai_pac_dual_task"
     _target_name, target_key, target_header = target_definition_for_kind(model["model_kind"])
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["时间", *[(item.get("tag_code") or item["label"]) for item in schema], target_header])
+    if is_dual_task:
+        writer.writerow(["时间", *[(item.get("tag_code") or item["label"]) for item in schema]])
+    else:
+        writer.writerow(["时间", *[(item.get("tag_code") or item["label"]) for item in schema], target_header])
     for row in detail["samples"]:
         values = row.get("values", {})
-        writer.writerow([row["sample_time"], *[model_csv_number(values.get(item["key"])) for item in schema], model_csv_number(values.get(target_key))])
+        if is_dual_task:
+            writer.writerow([row["sample_time"], *[model_csv_number(values.get(item["key"])) for item in schema]])
+        else:
+            writer.writerow([row["sample_time"], *[model_csv_number(values.get(item["key"])) for item in schema], model_csv_number(values.get(target_key))])
     return StreamingResponse(
         iter(["\ufeff" + buf.getvalue()]),
         media_type="text/csv; charset=utf-8-sig",
@@ -211,12 +220,34 @@ def model_csv_number(value: Any) -> Any:
     return value
 
 
+@router.get("/api/models/{model_id}/features.csv")
+def export_model_features(model_id: int) -> StreamingResponse:
+    with db_session() as con:
+        model = model_project_or_404(con, model_id)
+        if model["model_kind"] != "ai_pac_dual_task":
+            raise HTTPException(422, "仅双任务模型支持导出处理后特征数据")
+        zip_bytes = export_dual_task_features(con, model)
+    return StreamingResponse(
+        iter([zip_bytes]),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=model_{model_id}_features.zip"},
+    )
+
+
 @router.post("/api/models/{model_id}/train")
 def train_model_project(model_id: int) -> dict[str, Any]:
     with db_session() as con:
         model = model_project_or_404(con, model_id)
         trained = train_model_project_artifact(con, model)
-        audit(con, "local", "train", "model_project", str(model_id), {"samples": trained["metrics"]["samples"]})
+        metrics = trained["metrics"]
+        if model["model_kind"] == "ai_pac_dual_task":
+            audit_detail = {
+                "task1_samples": metrics.get("task1", {}).get("samples"),
+                "task2_samples": metrics.get("task2", {}).get("samples"),
+            }
+        else:
+            audit_detail = {"samples": metrics.get("samples")}
+        audit(con, "local", "train", "model_project", str(model_id), audit_detail)
         return {"ok": True, "model": model_project_detail(con, model_id)["model"]}
 
 
@@ -271,6 +302,10 @@ def download_model_artifact(model_id: int) -> StreamingResponse:
         content = dumps_json(artifact)
         media_type = "application/json; charset=utf-8"
         filename = artifact.get("file_name") or f"model_{model_id}_artifact.json"
+    elif artifact.get("format") == "ai_pac_dual_task_v1" and artifact.get("booster_models"):
+        content = dumps_json(artifact)
+        media_type = "application/json; charset=utf-8"
+        filename = artifact.get("file_name") or f"model_{model_id}_dual_task_artifact.json"
     else:
         content = dumps_json(artifact)
         media_type = "application/json; charset=utf-8"
@@ -304,7 +339,7 @@ def model_project_rows(con) -> list[dict[str, Any]]:
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
         LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
-        WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict')
+        WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict','ai_pac_dual_task')
         ORDER BY mp.updated_at DESC, mp.id DESC
         """
     ).fetchall()
@@ -320,7 +355,7 @@ def model_project_summary_rows(con) -> list[dict[str, Any]]:
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
         LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
-        WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict')
+        WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict','ai_pac_dual_task')
         ORDER BY CASE mp.status WHEN 'published' THEN 0 WHEN 'ready' THEN 1 ELSE 2 END,
                  mp.updated_at DESC,mp.id DESC
         """
@@ -349,6 +384,7 @@ def model_project_detail(
     model_id: int,
     sample_start: str | None = None,
     sample_end: str | None = None,
+    skip_samples: bool = False,
 ) -> dict[str, Any]:
     row = con.execute(
         """
@@ -371,22 +407,23 @@ def model_project_detail(
             "UPDATE model_projects SET training_config_json=?,updated_at=? WHERE id=?",
             (dumps_json(model["training_config"]), utc_now_iso(), model_id),
         )
-    where = "WHERE model_project_id=?"
-    params: list[Any] = [model_id]
-    if sample_start:
-        where += " AND sample_time>=?"
-        params.append(sample_start)
-    if sample_end:
-        where += " AND sample_time<=?"
-        params.append(sample_end)
     samples = []
-    for sample in con.execute(
-        f"SELECT * FROM model_training_samples {where} ORDER BY sample_time DESC,id DESC",
-        params,
-    ).fetchall():
-        item = row_to_dict(sample)
-        item["target_value"] = item.get("target_value")
-        samples.append(item)
+    if not skip_samples:
+        where = "WHERE model_project_id=?"
+        params: list[Any] = [model_id]
+        if sample_start:
+            where += " AND sample_time>=?"
+            params.append(sample_start)
+        if sample_end:
+            where += " AND sample_time<=?"
+            params.append(sample_end)
+        for sample in con.execute(
+            f"SELECT * FROM model_training_samples {where} ORDER BY sample_time DESC,id DESC",
+            params,
+        ).fetchall():
+            item = row_to_dict(sample)
+            item["target_value"] = item.get("target_value")
+            samples.append(item)
     return {
         "model": model,
         "columns": model.get("feature_schema", []),

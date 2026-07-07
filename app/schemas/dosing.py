@@ -28,6 +28,7 @@ class DosingPointCreate(BaseModel):
     bio_mlss2_tag_id: int | None = None
     tp_model_id: int | None = None
     pac_flow_model_id: int | None = None
+    dual_model_id: int | None = None
     process_parameter_group_id: int | None = None
     display_order: int | None = Field(default=0, ge=0, le=10000)
     write_enabled: bool = False
@@ -58,6 +59,7 @@ class DosingPointUpdate(BaseModel):
     bio_mlss2_tag_id: int | None = None
     tp_model_id: int | None = None
     pac_flow_model_id: int | None = None
+    dual_model_id: int | None = None
     process_parameter_group_id: int | None = None
     display_order: int | None = Field(default=None, ge=0, le=10000)
     write_enabled: bool | None = None
