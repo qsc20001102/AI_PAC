@@ -8,7 +8,12 @@ from fastapi import HTTPException
 from app.api.common import row_to_dict
 from app.database import utc_now_iso
 from app.schemas import PlcDeviceCreate, PlcDeviceUpdate
-from app.services.plc import connect_s7_1500, disconnect_client
+from app.services.plc import (
+    connect_modbus_tcp,
+    connect_s7_1500,
+    disconnect_client,
+    disconnect_modbus_client,
+)
 
 
 _plc_clients: dict[int, Any] = {}
@@ -38,10 +43,10 @@ def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
     clients = plc_client_store()
     client = clients.get(device_id)
     if client is not None:
-        if plc_client_connected(client):
+        if plc_client_connected(client, device_id):
             return client
         clients.pop(device_id, None)
-        disconnect_client(client)
+        disconnect_plc_client(client, device_id)
         now = utc_now_iso()
         con.execute(
             """
@@ -55,7 +60,11 @@ def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
         return None
 
     device = con.execute("SELECT * FROM plc_devices WHERE id=?", (device_id,)).fetchone()
-    if not device or not bool(device["enabled"]) or device["protocol"] != "s7_1500":
+    if not device or not bool(device["enabled"]):
+        return None
+
+    protocol = device["protocol"]
+    if protocol not in ("s7_1500", "modbus_tcp"):
         return None
 
     # 判断是否应该尝试连接
@@ -71,26 +80,38 @@ def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
 
     _last_reconnect_attempt[device_id] = time.monotonic()
 
-    result = connect_s7_1500(
-        ip_address=device["ip_address"],
-        port=int(device["port"]),
-        rack=int(device["rack"]),
-        slot=int(device["slot"]),
-        timeout_ms=int(device["timeout_ms"]),
-    )
+    # 根据协议分发连接逻辑
+    if protocol == "s7_1500":
+        result = connect_s7_1500(
+            ip_address=device["ip_address"],
+            port=int(device["port"]),
+            rack=int(device["rack"]),
+            slot=int(device["slot"]),
+            timeout_ms=int(device["timeout_ms"]),
+        )
+    elif protocol == "modbus_tcp":
+        result = connect_modbus_tcp(
+            ip_address=device["ip_address"],
+            port=int(device["port"]),
+            timeout_ms=int(device["timeout_ms"]),
+        )
+    else:
+        return None
+
     now = utc_now_iso()
     if result.ok and result.client is not None:
         clients[device_id] = result.client
         _last_reconnect_attempt.pop(device_id, None)
+        pdu_length = getattr(result, "pdu_length", None) if hasattr(result, "pdu_length") else None
         con.execute(
             """
             UPDATE plc_devices
             SET status='connected', pdu_length=?, last_connected_at=?, last_error=NULL, updated_at=?
             WHERE id=?
             """,
-            (result.pdu_length, now, now, device_id),
+            (pdu_length, now, now, device_id),
         )
-        log_plc_device_event(con, device_id, "reconnect", "connected", "断线重连成功，PLC 连接已恢复", result.pdu_length)
+        log_plc_device_event(con, device_id, "reconnect", "connected", "断线重连成功，PLC 连接已恢复", pdu_length)
         return result.client
 
     con.execute(
@@ -111,32 +132,47 @@ def auto_connect_enabled_plc_devices(con) -> dict[str, int]:
     summary = {"attempted": 0, "connected": 0, "failed": 0, "skipped": 0}
     for device in rows:
         device_id = int(device["id"])
-        if device["protocol"] != "s7_1500":
+        protocol = device["protocol"]
+        if protocol not in ("s7_1500", "modbus_tcp"):
             summary["skipped"] += 1
             continue
         old_client = clients.pop(device_id, None)
         if old_client is not None:
-            disconnect_client(old_client)
+            disconnect_plc_client(old_client, device_id)
         summary["attempted"] += 1
-        result = connect_s7_1500(
-            ip_address=device["ip_address"],
-            port=int(device["port"]),
-            rack=int(device["rack"]),
-            slot=int(device["slot"]),
-            timeout_ms=int(device["timeout_ms"]),
-        )
+
+        # 根据协议分发连接逻辑
+        if protocol == "s7_1500":
+            result = connect_s7_1500(
+                ip_address=device["ip_address"],
+                port=int(device["port"]),
+                rack=int(device["rack"]),
+                slot=int(device["slot"]),
+                timeout_ms=int(device["timeout_ms"]),
+            )
+        elif protocol == "modbus_tcp":
+            result = connect_modbus_tcp(
+                ip_address=device["ip_address"],
+                port=int(device["port"]),
+                timeout_ms=int(device["timeout_ms"]),
+            )
+        else:
+            summary["skipped"] += 1
+            continue
+
         now = utc_now_iso()
         if result.ok and result.client is not None:
             clients[device_id] = result.client
+            pdu_length = getattr(result, "pdu_length", None) if hasattr(result, "pdu_length") else None
             con.execute(
                 """
                 UPDATE plc_devices
                 SET status='connected', pdu_length=?, last_connected_at=?, last_error=NULL, updated_at=?
                 WHERE id=?
                 """,
-                (result.pdu_length, now, now, device_id),
+                (pdu_length, now, now, device_id),
             )
-            log_plc_device_event(con, device_id, "auto_connect", "connected", "项目启动自动连接 PLC 成功", result.pdu_length)
+            log_plc_device_event(con, device_id, "auto_connect", "connected", "项目启动自动连接 PLC 成功", pdu_length)
             summary["connected"] += 1
             continue
 
@@ -153,13 +189,65 @@ def auto_connect_enabled_plc_devices(con) -> dict[str, int]:
     return summary
 
 
-def plc_client_connected(client: Any) -> bool:
-    if not hasattr(client, "get_connected"):
-        return True
-    try:
-        return bool(client.get_connected())
-    except Exception:
+def plc_client_connected(client: Any, device_id: int | None = None) -> bool:
+    """判断 PLC 客户端是否已连接
+
+    支持两种协议：
+    - S7-1500：通过 get_connected() 方法判断
+    - Modbus TCP：通过 connected 属性判断
+    """
+    if client is None:
         return False
+
+    # S7-1500 协议：有 get_connected 方法
+    if hasattr(client, "get_connected"):
+        try:
+            return bool(client.get_connected())
+        except Exception:
+            return False
+
+    # Modbus TCP 协议：有 connected 属性
+    if hasattr(client, "connected"):
+        try:
+            return bool(client.connected)
+        except Exception:
+            return False
+
+    # 无法判断时，假设已连接
+    return True
+
+
+def disconnect_plc_client(client: Any, device_id: int | None = None) -> None:
+    """断开 PLC 客户端连接，根据协议类型分发
+
+    支持两种协议：
+    - S7-1500：调用 disconnect_client（disconnect + destroy）
+    - Modbus TCP：调用 disconnect_modbus_client（close）
+    """
+    if client is None:
+        return
+
+    # S7-1500 协议：有 disconnect 和 destroy 方法
+    if hasattr(client, "disconnect") and hasattr(client, "destroy"):
+        disconnect_client(client)
+        return
+
+    # Modbus TCP 协议：有 close 方法
+    if hasattr(client, "close"):
+        disconnect_modbus_client(client)
+        return
+
+    # 未知类型，尝试通用断开
+    try:
+        if hasattr(client, "disconnect"):
+            client.disconnect()
+    except Exception:
+        pass
+    try:
+        if hasattr(client, "close"):
+            client.close()
+    except Exception:
+        pass
 
 
 def get_plc_device_or_404(con, device_id: int):
@@ -170,8 +258,8 @@ def get_plc_device_or_404(con, device_id: int):
 
 
 def validate_plc_device_payload(payload: PlcDeviceCreate | PlcDeviceUpdate) -> None:
-    if payload.protocol != "s7_1500":
-        raise HTTPException(422, "当前只支持 S7-1500 协议")
+    if payload.protocol not in ("s7_1500", "modbus_tcp"):
+        raise HTTPException(422, "当前只支持 S7-1500 和 Modbus TCP 协议")
     if not payload.name.strip():
         raise HTTPException(422, "PLC 设备名称不能为空")
     if not payload.ip_address.strip():

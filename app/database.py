@@ -247,12 +247,16 @@ CREATE TABLE IF NOT EXISTS plc_devices (
     timeout_ms INTEGER NOT NULL DEFAULT 5000,
     rack INTEGER NOT NULL DEFAULT 0,
     slot INTEGER NOT NULL DEFAULT 0,
+    unit_id INTEGER NOT NULL DEFAULT 1,
+    byte_order TEXT NOT NULL DEFAULT 'ABCD',
     pdu_length INTEGER,
     status TEXT NOT NULL DEFAULT 'disconnected',
     last_connected_at TEXT,
     last_disconnected_at TEXT,
     last_error TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
+    reconnect_enabled INTEGER NOT NULL DEFAULT 0,
+    reconnect_interval_seconds INTEGER NOT NULL DEFAULT 10,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -501,6 +505,8 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
         {
             "reconnect_enabled": "INTEGER NOT NULL DEFAULT 0",
             "reconnect_interval_seconds": "INTEGER NOT NULL DEFAULT 10",
+            "byte_order": "TEXT NOT NULL DEFAULT 'ABCD'",
+            "unit_id": "INTEGER NOT NULL DEFAULT 1",
         },
     )
     backfill_process_source_tags(con)

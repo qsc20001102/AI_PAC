@@ -1,4 +1,4 @@
-﻿function dataTypeLength(type) {
+function dataTypeLength(type) {
   if (type === "BOOL") return "1位";
   if (type === "INT") return "2字节";
   return "4字节";
@@ -194,7 +194,7 @@ async function renderData(main) {
     { id: PUBLIC_COLLECTION_GROUP_ID, name: "公共数据", code: "全系统共享", isPublic: true },
     ...points.map((point) => ({ id: String(point.id), name: point.name, code: point.code || "", isPublic: false })),
   ];
-  const deviceOptions = [{ value: "", label: "未选择" }, ...devices.map((device) => ({ value: String(device.id), label: device.name }))];
+  const deviceOptions = [{ value: "", label: "未选择", protocol: "" }, ...devices.map((device) => ({ value: String(device.id), label: device.name, protocol: device.protocol || "" }))];
   main.innerHTML = `
     <section class="page-grid">
       <aside class="panel">
@@ -242,7 +242,11 @@ async function renderData(main) {
               </tbody>
             </table>
           </div>
-          <div class="muted" style="margin-top:12px">地址示例：BOOL 使用 M1.0；REAL 使用 DB2.1186.0。DB 地址格式为 DB号.字节偏移.位偏移。</div>
+          <div class="muted" style="margin-top:12px">
+            <strong>S7-1500 地址格式：</strong>M1.0（位）、DB2.1186.0（DB块）、I0.0（输入）、Q4.0（输出）<br>
+            <strong>Modbus TCP 地址格式：</strong>40001~4xxxx(保持寄存器)、30001~3xxxx(输入寄存器)、00001~0xxxx(线圈)、10001~1xxxx(离散输入)<br>
+            <span style="margin-left:8em">简写格式：H1000、I1000、C1000、D1000</span>
+          </div>
         </div>
       </article>
     </section>

@@ -8,8 +8,14 @@ from app.api.common import row_to_dict
 from app.database import db_session, utc_now_iso
 from app.schemas import PlcDeviceCreate, PlcDeviceUpdate
 from app.services.audit import audit
-from app.services.plc import connect_s7_1500, disconnect_client
+from app.services.plc import (
+    connect_modbus_tcp,
+    connect_s7_1500,
+    disconnect_client,
+    disconnect_modbus_client,
+)
 from app.services.plc_devices import (
+    disconnect_plc_client,
     get_plc_device_or_404,
     log_plc_device_event,
     plc_client_store,
@@ -40,7 +46,10 @@ def plc_status() -> dict[str, Any]:
     return {
         "devices": devices,
         "events": events,
-        "supported_protocols": [{"value": "s7_1500", "label": "S7-1500"}],
+        "supported_protocols": [
+            {"value": "s7_1500", "label": "S7-1500"},
+            {"value": "modbus_tcp", "label": "Modbus TCP"},
+        ],
     }
 
 
@@ -49,14 +58,20 @@ def create_plc_device(payload: PlcDeviceCreate) -> dict[str, Any]:
     validate_plc_device_payload(payload)
     now = utc_now_iso()
     with db_session() as con:
+        # 根据协议保存不同的参数
+        rack_slot = payload.rack if payload.rack is not None else 0, payload.slot if payload.slot is not None else 0
+        # 所有协议都保存 unit_id 和 byte_order（S7-1500 使用默认值即可，不能传 None 因为 NOT NULL）
+        byte_order_value = payload.byte_order if payload.byte_order is not None else "ABCD"
+        unit_id_value = payload.unit_id if payload.unit_id is not None else 1
+
         cur = con.execute(
             """
             INSERT INTO plc_devices(
-                name,protocol,ip_address,port,timeout_ms,rack,slot,pdu_length,status,
+                name,protocol,ip_address,port,timeout_ms,rack,slot,unit_id,byte_order,pdu_length,status,
                 last_connected_at,last_disconnected_at,last_error,enabled,
                 reconnect_enabled,reconnect_interval_seconds,
                 created_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 payload.name.strip(),
@@ -64,8 +79,10 @@ def create_plc_device(payload: PlcDeviceCreate) -> dict[str, Any]:
                 payload.ip_address.strip(),
                 payload.port,
                 payload.timeout_ms,
-                payload.rack,
-                payload.slot,
+                rack_slot[0],
+                rack_slot[1],
+                unit_id_value,
+                byte_order_value,
                 None,
                 "disconnected",
                 None,
@@ -94,12 +111,19 @@ def update_plc_device(device_id: int, payload: PlcDeviceUpdate) -> dict[str, Any
         device = get_plc_device_or_404(con, device_id)
         active_client = plc_client_store().pop(device_id, None)
         if active_client is not None:
-            disconnect_client(active_client)
+            disconnect_plc_client(active_client, device_id)
             log_plc_device_event(con, device_id, "disconnect", "disconnected", "Configuration changed; connection closed", device["pdu_length"])
+
+        # 根据协议保存不同的参数
+        rack_slot = payload.rack if payload.rack is not None else 0, payload.slot if payload.slot is not None else 0
+        # 所有协议都保存 unit_id 和 byte_order（S7-1500 使用默认值即可，不能传 None 因为 NOT NULL）
+        byte_order_value = payload.byte_order if payload.byte_order is not None else "ABCD"
+        unit_id_value = payload.unit_id if payload.unit_id is not None else 1
+
         con.execute(
             """
             UPDATE plc_devices
-            SET name=?, protocol=?, ip_address=?, port=?, timeout_ms=?, rack=?, slot=?,
+            SET name=?, protocol=?, ip_address=?, port=?, timeout_ms=?, rack=?, slot=?, unit_id=?, byte_order=?,
                 status='disconnected', last_disconnected_at=?, last_error=NULL, enabled=?,
                 reconnect_enabled=?, reconnect_interval_seconds=?,
                 updated_at=?
@@ -111,8 +135,10 @@ def update_plc_device(device_id: int, payload: PlcDeviceUpdate) -> dict[str, Any
                 payload.ip_address.strip(),
                 payload.port,
                 payload.timeout_ms,
-                payload.rack,
-                payload.slot,
+                rack_slot[0],
+                rack_slot[1],
+                unit_id_value,
+                byte_order_value,
                 now,
                 int(payload.enabled),
                 int(payload.reconnect_enabled),
@@ -134,7 +160,7 @@ def delete_plc_device(device_id: int) -> dict[str, Any]:
         device = get_plc_device_or_404(con, device_id)
         active_client = plc_client_store().pop(device_id, None)
         if active_client is not None:
-            disconnect_client(active_client)
+            disconnect_plc_client(active_client, device_id)
         con.execute("DELETE FROM plc_devices WHERE id=?", (device_id,))
         audit(con, "local", "delete", "plc_device", str(device_id), row_to_dict(device))
     return {"ok": True, "deleted_id": device_id}
@@ -146,34 +172,48 @@ def connect_plc_device(device_id: int) -> dict[str, Any]:
         device = get_plc_device_or_404(con, device_id)
         if not bool(device["enabled"]):
             raise HTTPException(409, "PLC device is disabled")
-        if device["protocol"] != "s7_1500":
-            raise HTTPException(422, "Only S7-1500 is supported")
+
+        protocol = device["protocol"]
+        if protocol not in ("s7_1500", "modbus_tcp"):
+            raise HTTPException(422, f"不支持协议：{protocol}")
 
         clients = plc_client_store()
         old_client = clients.pop(device_id, None)
         if old_client is not None:
-            disconnect_client(old_client)
+            disconnect_plc_client(old_client, device_id)
 
-        result = connect_s7_1500(
-            ip_address=device["ip_address"],
-            port=int(device["port"]),
-            rack=int(device["rack"]),
-            slot=int(device["slot"]),
-            timeout_ms=int(device["timeout_ms"]),
-        )
+        # 根据协议分发连接逻辑
+        if protocol == "s7_1500":
+            result = connect_s7_1500(
+                ip_address=device["ip_address"],
+                port=int(device["port"]),
+                rack=int(device["rack"]) if device["rack"] is not None else 0,
+                slot=int(device["slot"]) if device["slot"] is not None else 0,
+                timeout_ms=int(device["timeout_ms"]),
+            )
+        elif protocol == "modbus_tcp":
+            result = connect_modbus_tcp(
+                ip_address=device["ip_address"],
+                port=int(device["port"]),
+                timeout_ms=int(device["timeout_ms"]),
+            )
+        else:
+            raise HTTPException(422, f"不支持协议：{protocol}")
+
         now = utc_now_iso()
         if result.ok:
             clients[device_id] = result.client
+            pdu_length = getattr(result, "pdu_length", None) if hasattr(result, "pdu_length") else None
             con.execute(
                 """
                 UPDATE plc_devices
                 SET status='connected', pdu_length=?, last_connected_at=?, last_error=NULL, updated_at=?
                 WHERE id=?
                 """,
-                (result.pdu_length, now, now, device_id),
+                (pdu_length, now, now, device_id),
             )
-            log_plc_device_event(con, device_id, "connect", "connected", result.message, result.pdu_length)
-            audit(con, "local", "connect", "plc_device", str(device_id), {"pdu_length": result.pdu_length})
+            log_plc_device_event(con, device_id, "connect", "connected", result.message, pdu_length)
+            audit(con, "local", "connect", "plc_device", str(device_id), {"pdu_length": pdu_length})
         else:
             con.execute(
                 """
@@ -196,7 +236,7 @@ def disconnect_plc_device(device_id: int) -> dict[str, Any]:
         device = get_plc_device_or_404(con, device_id)
         active_client = plc_client_store().pop(device_id, None)
         if active_client is not None:
-            disconnect_client(active_client)
+            disconnect_plc_client(active_client, device_id)
             message = "PLC connection closed"
         else:
             message = "No active runtime connection; device marked disconnected"

@@ -1,10 +1,13 @@
 async function boot() {
-  // 清除所有可能残留的定时器（防止 bfcache 恢复旧页面状态）
   for (let i = 1; i < 99999; i++) {
     window.clearInterval(i);
     window.clearTimeout(i);
   }
   await initAuth();
+  const hashPage = window.location.hash.slice(2);
+  if (hashPage && ["overview", "process", "processParams", "models", "plc", "data", "trends", "alarms", "settings"].includes(hashPage)) {
+    state.activePage = hashPage;
+  }
   renderNav();
   renderUserArea();
   tickClock();
@@ -61,7 +64,7 @@ function userRole() {
 
 function navAllowed(role) {
   if (role === "admin") return true;
-  const allowed = ["process", "data", "plc", "alarms", "settings"];
+  const allowed = ["process", "data", "plc", "models", "alarms", "settings"];
   return allowed.includes(role);
 }
 
@@ -69,7 +72,7 @@ function visibleNavItems() {
   const role = userRole();
   return navItems.filter(([id]) => {
     if (role === "admin") return true;
-    return ["overview", "processParams", "trends", "plc", "alarms", "settings"].includes(id);
+    return ["overview", "processParams", "trends", "plc", "models", "alarms", "settings"].includes(id);
   });
 }
 
@@ -194,7 +197,7 @@ async function renderPage() {
     return;
   }
   const role = userRole();
-  const allowed = ["overview", "processParams", "trends", "plc", "alarms", "settings"];
+  const allowed = ["overview", "processParams", "trends", "plc", "models", "alarms", "settings"];
   if (role !== "admin" && !allowed.includes(state.activePage)) {
     state.activePage = "overview";
     renderNav();

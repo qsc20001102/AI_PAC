@@ -16,10 +16,23 @@ from app.services.recommendation import calculate_for_point
 
 def validate_collection_payload(payload: CollectionTagUpdate) -> None:
     payload.data_type = payload.data_type.upper()
-    if payload.data_type not in {"REAL", "BOOL", "INT"}:
-        raise HTTPException(422, "数据类型只支持 REAL、BOOL、INT")
+    if payload.data_type not in {"REAL", "BOOL", "INT", "DINT", "UINT"}:
+        raise HTTPException(422, "数据类型只支持 REAL、BOOL、INT、DINT、UINT")
     address = payload.data_address.strip().upper()
     if address:
+        if payload.plc_device_id is not None:
+            with db_session() as con:
+                device = con.execute(
+                    "SELECT protocol FROM plc_devices WHERE id=?",
+                    (payload.plc_device_id,),
+                ).fetchone()
+                if device and device["protocol"] == "modbus_tcp":
+                    try:
+                        from app.services.plc import parse_modbus_address
+                        parse_modbus_address(address, payload.data_type)
+                    except ValueError as exc:
+                        raise HTTPException(422, str(exc)) from exc
+                    return
         try:
             parse_s7_address(address, payload.data_type)
         except ValueError as exc:
@@ -124,7 +137,23 @@ def poll_collection_rows(con, rows: list[Any], force_history: bool = False) -> d
             read_failed += 1
             continue
         try:
-            result = read_s7_value(client, address, data_type)
+            device_info = con.execute(
+                "SELECT protocol, byte_order, unit_id FROM plc_devices WHERE id=?",
+                (device_id,),
+            ).fetchone()
+            if device_info and device_info["protocol"] == "modbus_tcp":
+                from app.services.plc import read_modbus_value
+                result = read_modbus_value(
+                    client,
+                    address,
+                    data_type,
+                    byte_order=device_info["byte_order"] or "ABCD",
+                    unit_id=device_info["unit_id"] or 1,
+                )
+                source = "modbus"
+            else:
+                result = read_s7_value(client, address, data_type)
+                source = "s7comm"
             con.execute(
                 """
                 UPDATE sensor_tags
@@ -140,7 +169,7 @@ def poll_collection_rows(con, rows: list[Any], force_history: bool = False) -> d
                     INSERT OR REPLACE INTO sensor_samples(tag_id,value,unit,sample_time,receive_time,quality,source)
                     VALUES(?,?,?,?,?,?,?)
                     """,
-                    (tag_id, result.numeric_value, row["unit"], now_iso, now_iso, "good", "s7comm"),
+                    (tag_id, result.numeric_value, row["unit"], now_iso, now_iso, "good", source),
                 )
                 con.execute("UPDATE sensor_tags SET last_history_at=? WHERE id=?", (now_iso, tag_id))
                 history_written += 1

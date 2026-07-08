@@ -108,6 +108,10 @@ function modelKindLabel(model) {
   return "智能PAC双任务预测";
 }
 
+function hiddenField(name, value) {
+  return `<input type="hidden" name="${name}" value="${htmlEscape(value)}">`;
+}
+
 function renderNewModelWorkspace() {
   const defaultName = "训练模型";
   return `
