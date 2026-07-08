@@ -262,7 +262,7 @@ def dual_task_model(con: sqlite3.Connection, dosing_point_id: int) -> sqlite3.Ro
 
 
 def fetch_history_for_dual_model(con: sqlite3.Connection, dosing_point_id: int, now: datetime) -> pd.DataFrame | None:
-    """为双任务模型获取最近约14小时的历史数据（至少80条）"""
+    """为双任务模型获取历史数据（至少80条）"""
     point = con.execute("SELECT * FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
     if not point:
         return None
@@ -294,8 +294,7 @@ def fetch_history_for_dual_model(con: sqlite3.Connection, dosing_point_id: int, 
     if not tag_ids:
         return None
 
-    # 获取最近14小时的数据
-    since = (now - timedelta(hours=14)).isoformat()
+    since = (now - timedelta(hours=72)).isoformat()
     placeholders = ",".join("?" * len(tag_ids))
     rows = con.execute(
         f"""
@@ -310,7 +309,6 @@ def fetch_history_for_dual_model(con: sqlite3.Connection, dosing_point_id: int, 
     if not rows:
         return None
 
-    # 构建DataFrame：按时间合并所有tag的值
     records = []
     for row in rows:
         records.append({
@@ -323,23 +321,18 @@ def fetch_history_for_dual_model(con: sqlite3.Connection, dosing_point_id: int, 
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
-    # pivot：每个时间点一行，每个tag一列
     pivoted = df.pivot_table(index="timestamp", columns="tag_col", values="value", aggfunc="mean")
     pivoted = pivoted.reset_index()
 
-    # 确保所有需要的列都存在
     for col in tag_field_map.values():
         if col not in pivoted.columns:
             pivoted[col] = np.nan
 
-    # 按时间排序，取最近80条
-    pivoted = pivoted.sort_values("timestamp").tail(80).reset_index(drop=True)
+    pivoted = pivoted.sort_values("timestamp").reset_index(drop=True)
 
-    # 前向填充缺失值
     for col in tag_field_map.values():
         pivoted[col] = pivoted[col].ffill().bfill()
 
-    # 删除仍有NaN的行
     pivoted = pivoted.dropna(subset=list(tag_field_map.values())).reset_index(drop=True)
 
     return pivoted if len(pivoted) >= 36 else None
@@ -351,13 +344,13 @@ def predict_dual_task_model(
 ) -> tuple[float | None, float | None, dict[str, Any] | None, str | None]:
     """使用双任务模型预测 PAC 加药量和下次出水TP"""
     artifact = loads_json(model["artifact_json"], {})
-    if artifact.get("format") != "ai_pac_dual_task_v1":
-        return None, None, None, "模型文件格式已过期，请重新训练"
+    fmt = artifact.get("format", "")
+    if fmt not in ("ai_pac_dual_task_v1", "ai_pac_dual_task_v2"):
+        return None, None, None, "模型文件格式不支持"
     if not artifact.get("booster_models") or not artifact.get("feature_names"):
         return None, None, None, "模型文件无效"
 
     try:
-        # 直接用 model_str 加载模型，避免临时文件 I/O 和 format error
         import lightgbm as lgb
         from collections import deque
 
@@ -366,13 +359,16 @@ def predict_dual_task_model(
         features1 = artifact["feature_names"]["task1"]
         features2 = artifact["feature_names"]["task2"]
 
-        # 构造 InferencePipeline 实例（绕过文件加载）
+        sample_interval = float(artifact.get("sample_interval_minutes", 5.0))
+        buffer_size = 120 if fmt == "ai_pac_dual_task_v2" else 80
+
         pipeline = wwtp_ai_engine.InferencePipeline.__new__(wwtp_ai_engine.InferencePipeline)
         pipeline.model1 = booster1
         pipeline.model2 = booster2
         pipeline.features1 = features1
         pipeline.features2 = features2
-        pipeline.history = deque(maxlen=80)
+        pipeline.history = deque(maxlen=buffer_size)
+        pipeline.sample_interval_minutes = sample_interval
 
         pipeline.init_history(history_df)
         result = pipeline.predict()
@@ -385,7 +381,10 @@ def predict_dual_task_model(
         detail = {
             "model_id": model["id"],
             "version": model["name"],
-            "format": artifact.get("format"),
+            "format": fmt,
+            "label_mode": artifact.get("label_mode"),
+            "used_lag_rows": artifact.get("used_lag_rows"),
+            "hrt_minutes": artifact.get("hrt_minutes"),
             "pac_dosage_prediction": pac_pred,
             "tp_delta_prediction": result["tp_delta_prediction"],
             "current_outflow_tp": result["current_outflow_tp"],
@@ -430,8 +429,9 @@ def optimize_pac_for_target_tp_dual(
         return None, None, None, "最大加药量小于最小加药量"
 
     artifact = loads_json(model["artifact_json"], {})
-    if artifact.get("format") != "ai_pac_dual_task_v1":
-        return None, None, None, "模型文件格式已过期"
+    fmt = artifact.get("format", "")
+    if fmt not in ("ai_pac_dual_task_v1", "ai_pac_dual_task_v2"):
+        return None, None, None, "模型文件格式不支持"
     if not artifact.get("booster_models") or not artifact.get("feature_names"):
         return None, None, None, "模型文件无效"
 
@@ -442,17 +442,20 @@ def optimize_pac_for_target_tp_dual(
         booster2 = lgb.Booster(model_str=artifact["booster_models"]["task2"])
         features2 = artifact["feature_names"]["task2"]
 
+        sample_interval = float(artifact.get("sample_interval_minutes", 5.0))
+        buffer_size = 120 if fmt == "ai_pac_dual_task_v2" else 80
+
         pipeline = wwtp_ai_engine.InferencePipeline.__new__(wwtp_ai_engine.InferencePipeline)
         pipeline.model1 = None
         pipeline.model2 = booster2
         pipeline.features1 = []
         pipeline.features2 = features2
-        pipeline.history = deque(maxlen=80)
+        pipeline.history = deque(maxlen=buffer_size)
+        pipeline.sample_interval_minutes = sample_interval
 
         current_tp = float(history_df["outflow_tp"].iloc[-1])
         checked = 0
 
-        # 先检查边界
         tp_at_min = _predict_tp_for_pac(history_df, min_l_h, pipeline, booster2, features2)
         checked += 1
         if tp_at_min <= target_tp:

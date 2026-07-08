@@ -17,6 +17,7 @@ class ProcessParameterGroupIn(BaseModel):
     calculation_interval_seconds: int = Field(ge=5, le=86400)
     pac_density_kg_l: float = Field(gt=0, le=2)
     unit_dose_curve: list[UnitDoseCurvePoint] = Field(min_length=2)
+    tp_hrt_minutes: float | None = Field(default=None, ge=1, le=1440)
 
 
 class SettingUpdate(BaseModel):

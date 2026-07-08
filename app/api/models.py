@@ -101,15 +101,30 @@ def update_model_project(model_id: int, payload: ModelProjectUpdate) -> dict[str
         model = model_project_or_404(con, model_id)
         schema = sync_model_feature_schema(con, model)
         training_config = normalize_training_config(payload.training_config, model["model_kind"], schema)
+        
+        sample_interval = None
+        if isinstance(payload.training_config, dict):
+            sample_interval = payload.training_config.get("sample_interval_minutes")
+        
         try:
-            con.execute(
-                """
-                UPDATE model_projects
-                SET name=?, training_config_json=?, updated_at=?
-                WHERE id=?
-                """,
-                (payload.name.strip(), dumps_json(training_config), utc_now_iso(), model_id),
-            )
+            if sample_interval is not None and sample_interval > 0:
+                con.execute(
+                    """
+                    UPDATE model_projects
+                    SET name=?, training_config_json=?, sample_interval_minutes=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (payload.name.strip(), dumps_json(training_config), int(sample_interval), utc_now_iso(), model_id),
+                )
+            else:
+                con.execute(
+                    """
+                    UPDATE model_projects
+                    SET name=?, training_config_json=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (payload.name.strip(), dumps_json(training_config), utc_now_iso(), model_id),
+                )
         except Exception as exc:
             if "UNIQUE" in str(exc).upper():
                 raise HTTPException(409, "模型名称已存在") from exc

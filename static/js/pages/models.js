@@ -148,6 +148,12 @@ function renderModelWorkspace(detail) {
           <span>任务2样本 ${metrics.task2?.samples ?? 0}</span>
           <span>任务2特征 ${metrics.task2?.feature_count ?? 0}</span>
         </div>
+        <div class="model-metrics">
+          <span>标签模式：${artifact.label_mode === "fixed_hrt" ? "固定HRT" : artifact.label_mode === "auto_detected" ? "自动推断" : "未知"}</span>
+          <span>使用延迟行数：${artifact.used_lag_rows ?? "-"}</span>
+          <span>HRT(分钟)：${artifact.hrt_minutes ?? "自动"}</span>
+          <span>采样间隔(分钟)：${artifact.sample_interval_minutes ?? 5}</span>
+        </div>
         ${renderDualTaskEvalMetrics(metrics)}`
       : '<div class="muted">样本数达到 40 条后可开始双任务 LightGBM 训练。</div>')
     : (model.trained_at
@@ -378,6 +384,12 @@ function renderDualTaskTrainingConfig(model, config) {
             <div class="model-param-grid">
               ${modelNumberField("train_ratio", config.train_ratio, 0.1, 0.9, "0.01", model)}
               ${modelNumberField("val_ratio", config.val_ratio, 0.05, 0.5, "0.01", model)}
+              ${modelNumberField("tp_hrt_minutes", config.tp_hrt_minutes ?? "", 1, 1440, "1", model)}
+              ${modelNumberField("sample_interval_minutes", config.sample_interval_minutes ?? "", 1, 1440, "1", model)}
+            </div>
+            <div class="muted" style="margin-top:8px;">
+              出水TP停留时间：设置后用固定延迟构建标签；不填则自动推断最佳延迟。<br>
+              采样间隔：设置后使用固定值；不填则从数据中自动推断。
             </div>
           </div></div>
         </div>
@@ -561,6 +573,8 @@ function modelTrainingConfig(model, columns) {
       train_ratio: raw.split?.train_ratio ?? 0.7,
       val_ratio: raw.split?.val_ratio ?? 0.15,
       seed: raw.seed ?? 42,
+      tp_hrt_minutes: raw.tp_hrt_minutes ?? null,
+      sample_interval_minutes: model.sample_interval_minutes ?? null,
     };
   }
   const keys = columns.map((column) => column.key);
@@ -614,14 +628,18 @@ function modelProjectPayload(form, model, columns) {
       "learning_rate", "feature_fraction", "bagging_fraction", "bagging_freq",
       "lambda_l1", "lambda_l2", "num_boost_round", "early_stopping_rounds"];
     const makeTask = (prefix) => Object.fromEntries(taskKeys.map((k) => [k, Number(payload[`${prefix}_${k}`])]));
+    const hrtVal = payload.tp_hrt_minutes;
+    const intervalVal = payload.sample_interval_minutes;
     payload.training_config = {
       task1: makeTask("task1"),
       task2: makeTask("task2"),
       split: { train_ratio: Number(payload.train_ratio), val_ratio: Number(payload.val_ratio) },
       seed: Number(payload.seed),
+      tp_hrt_minutes: hrtVal && hrtVal !== "" ? Number(hrtVal) : null,
+      sample_interval_minutes: intervalVal && intervalVal !== "" ? Number(intervalVal) : null,
     };
     taskKeys.forEach((k) => { delete payload[`task1_${k}`]; delete payload[`task2_${k}`]; });
-    ["train_ratio", "val_ratio", "seed"].forEach((k) => { delete payload[k]; });
+    ["train_ratio", "val_ratio", "seed", "tp_hrt_minutes", "sample_interval_minutes"].forEach((k) => { delete payload[k]; });
     return payload;
   }
   const featureColumns = [...form.querySelectorAll("[data-model-feature-column]:checked")].map((node) => node.dataset.modelFeatureColumn);

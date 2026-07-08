@@ -462,7 +462,7 @@ def target_aliases_for_kind(kind: str) -> tuple[str, ...]:
 
 def model_artifact_format(kind: str) -> str:
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
-        return "ai_pac_dual_task_v1"
+        return "ai_pac_dual_task_v2"
     if kind == MODEL_KIND_PAC_FLOW_PREDICT:
         return "ai_pac_flow_predict_v1"
     return "ai_pac_tp_forecast_v3"
@@ -778,7 +778,30 @@ def train_dual_task_artifact(con, model) -> dict[str, Any]:
     raw = loads_json(model_row_value(model, "training_config_json", "{}"), {})
     training_config = wwtp_ai_engine.normalize_training_config(raw)
 
-    # 读取所有样本
+    sample_interval_minutes = float(
+        model_row_value(model, "sample_interval_minutes", 0) or 0
+    )
+
+    hrt_minutes: float | None = None
+    config_hrt = raw.get("tp_hrt_minutes") if isinstance(raw, dict) else None
+    if config_hrt is not None and config_hrt > 0:
+        hrt_minutes = float(config_hrt)
+
+    if hrt_minutes is None:
+        dosing_point_id = model_row_value(model, "dosing_point_id")
+        if dosing_point_id is not None:
+            point = con.execute(
+                "SELECT process_parameter_group_id FROM dosing_points WHERE id=?",
+                (int(dosing_point_id),),
+            ).fetchone()
+            if point and point["process_parameter_group_id"]:
+                pg = con.execute(
+                    "SELECT tp_hrt_minutes FROM process_parameter_groups WHERE id=?",
+                    (point["process_parameter_group_id"],),
+                ).fetchone()
+                if pg and pg["tp_hrt_minutes"] is not None and pg["tp_hrt_minutes"] > 0:
+                    hrt_minutes = float(pg["tp_hrt_minutes"])
+
     samples = [
         row_to_dict(row)
         for row in con.execute(
@@ -789,29 +812,29 @@ def train_dual_task_artifact(con, model) -> dict[str, Any]:
     if len(samples) < 40:
         raise HTTPException(409, "双任务模型至少需要 40 条训练样本")
 
-    # 构建DataFrame
     df = wwtp_ai_engine.samples_to_dataframe(samples)
     if len(df) < 40:
         raise HTTPException(409, "有效样本不足，请检查数据质量")
 
-    # 特征工程
-    datasets = wwtp_ai_engine.FeatureEngineer.build_features(df, for_training=True)
+    datasets = wwtp_ai_engine.FeatureEngineer.build_features(
+        df,
+        for_training=True,
+        hrt_minutes=hrt_minutes,
+        sample_interval_minutes=sample_interval_minutes,
+    )
     if len(datasets["task1"]) < 20 or len(datasets["task2"]) < 20:
         raise HTTPException(409, "特征工程后可用样本不足")
 
-    # 训练
     temp_dir = tempfile.mkdtemp(prefix="wwtp_dual_task_")
     try:
         trainer = wwtp_ai_engine.ModelTrainer(config=training_config)
         result = trainer.train_both(datasets, output_dir=temp_dir)
 
-        # 读取模型字符串
         with open(result["model1_path"], "r", encoding="utf-8") as f:
             booster1_str = f.read()
         with open(result["model2_path"], "r", encoding="utf-8") as f:
             booster2_str = f.read()
 
-        # artifact
         artifact = {
             "format": model_artifact_format(MODEL_KIND_AI_PAC_DUAL_TASK),
             "model_kind": MODEL_KIND_AI_PAC_DUAL_TASK,
@@ -826,6 +849,10 @@ def train_dual_task_artifact(con, model) -> dict[str, Any]:
             "training_config": training_config,
             "trained_at": utc_now_iso(),
             "lightgbm_version": lgb.__version__,
+            "label_mode": datasets.get("label_mode", "legacy"),
+            "used_lag_rows": datasets.get("used_lag_rows"),
+            "hrt_minutes": datasets.get("hrt_minutes"),
+            "sample_interval_minutes": datasets.get("sample_interval_minutes"),
         }
 
         metrics = {
@@ -838,6 +865,9 @@ def train_dual_task_artifact(con, model) -> dict[str, Any]:
                 "feature_count": len(result["model2_features"]),
                 "samples": len(datasets["task2"]),
                 "eval": result.get("task2_metrics", {}),
+                "label_mode": datasets.get("label_mode", "legacy"),
+                "used_lag_rows": datasets.get("used_lag_rows"),
+                "hrt_minutes": datasets.get("hrt_minutes"),
             },
         }
 
@@ -860,6 +890,31 @@ def export_dual_task_features(con, model) -> bytes:
     import zipfile
     from io import BytesIO
 
+    sample_interval_minutes = float(
+        model_row_value(model, "sample_interval_minutes", 0) or 0
+    )
+
+    raw = loads_json(model_row_value(model, "training_config_json", "{}"), {})
+    hrt_minutes: float | None = None
+    config_hrt = raw.get("tp_hrt_minutes") if isinstance(raw, dict) else None
+    if config_hrt is not None and config_hrt > 0:
+        hrt_minutes = float(config_hrt)
+
+    if hrt_minutes is None:
+        dosing_point_id = model_row_value(model, "dosing_point_id")
+        if dosing_point_id is not None:
+            point = con.execute(
+                "SELECT process_parameter_group_id FROM dosing_points WHERE id=?",
+                (int(dosing_point_id),),
+            ).fetchone()
+            if point and point["process_parameter_group_id"]:
+                pg = con.execute(
+                    "SELECT tp_hrt_minutes FROM process_parameter_groups WHERE id=?",
+                    (point["process_parameter_group_id"],),
+                ).fetchone()
+                if pg and pg["tp_hrt_minutes"] is not None and pg["tp_hrt_minutes"] > 0:
+                    hrt_minutes = float(pg["tp_hrt_minutes"])
+
     samples = [
         row_to_dict(row)
         for row in con.execute(
@@ -871,7 +926,12 @@ def export_dual_task_features(con, model) -> bytes:
         raise HTTPException(409, "样本不足，无法导出特征")
 
     df = wwtp_ai_engine.samples_to_dataframe(samples)
-    datasets = wwtp_ai_engine.FeatureEngineer.build_features(df, for_training=True)
+    datasets = wwtp_ai_engine.FeatureEngineer.build_features(
+        df,
+        for_training=True,
+        hrt_minutes=hrt_minutes,
+        sample_interval_minutes=sample_interval_minutes,
+    )
 
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:

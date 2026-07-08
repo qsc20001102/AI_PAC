@@ -284,31 +284,46 @@ class FeatureEngineer:
 
     @staticmethod
     def build_features(
-        df: pd.DataFrame, for_training: bool = True
-    ) -> Dict[str, pd.DataFrame]:
+        df: pd.DataFrame,
+        for_training: bool = True,
+        hrt_minutes: float | None = None,
+        sample_interval_minutes: float = 5.0,
+    ) -> Dict[str, Any]:
         """
         构建两个任务的数据集
 
         Args:
             df: 清洗后的原始数据（至少包含RAW_COLS）
             for_training: 是否为训练模式（训练模式需要构建标签）
+            hrt_minutes: 出水TP水力停留时间（分钟），None表示自动推断
+            sample_interval_minutes: 采样间隔（分钟）
 
         Returns:
-            dict: {'task1': df1, 'task2': df2, 'task1_features': [...], 'task2_features': [...]}
+            dict: {'task1': df1, 'task2': df2, 'task1_features': [...], 'task2_features': [...],
+                   'label_mode': ..., 'used_lag_rows': ..., 'hrt_minutes': ..., 'sample_interval_minutes': ...}
         """
         df = df.copy()
         df = FeatureEngineer._add_time_features(df)
+        
+        if sample_interval_minutes <= 0 and 'timestamp' in df.columns:
+            inferred_interval = FeatureEngineer._infer_sample_interval(df)
+            sample_interval_minutes = inferred_interval
+            print(f"[特征工程] 自动推断采样间隔: {inferred_interval:.1f} 分钟")
+        
         df = FeatureEngineer._add_interaction_features(df)
         df = FeatureEngineer._add_lag_features(df)
         df = FeatureEngineer._add_rolling_features(df)
         df = FeatureEngineer._add_diff_features(df)
+        df = FeatureEngineer._add_pac_effective_features(df, sample_interval_minutes)
 
         # 任务1特有
         df["outflow_tp_lag1_above_target"] = (df["outflow_tp_lag1"] > 0.3).astype(int)
         df["outflow_tp_lag1_deviation"] = df["outflow_tp_lag1"] - 0.3
 
         # 任务2特有
-        df = FeatureEngineer._add_next_outflow_tp(df)
+        df, label_mode, used_lag_rows = FeatureEngineer._add_next_outflow_tp(
+            df, hrt_minutes, sample_interval_minutes
+        )
 
         # 构建数据集
         task1_features = [
@@ -436,7 +451,6 @@ class FeatureEngineer:
             "mlss_avg",
             "mlss_diff",
             "return_total",
-            "time_to_next_sample",
             "inflow_flow_lag1",
             "inflow_flow_lag2",
             "inflow_flow_lag3",
@@ -451,6 +465,7 @@ class FeatureEngineer:
             "outflow_tp_lag2",
             "outflow_tp_lag3",
             "outflow_tp_lag6",
+            "outflow_tp_lag12",
             "orp_total_avg_lag1",
             "orp_total_avg_lag3",
             "mlss_avg_lag1",
@@ -461,6 +476,13 @@ class FeatureEngineer:
             "pac_dosage_lag2",
             "pac_dosage_lag3",
             "pac_dosage_lag6",
+            "pac_dosage_lag12",
+            "pac_dosage_lag18",
+            "pac_dosage_lag24",
+            "pac_effective_tau60",
+            "pac_effective_tau120",
+            "pac_effective_tau180",
+            "pac_effective_tau240",
             "inflow_flow_rollmean_3",
             "inflow_flow_rollmean_6",
             "inflow_flow_rollstd_3",
@@ -501,6 +523,10 @@ class FeatureEngineer:
             "task2": df2,
             "task1_features": task1_features,
             "task2_features": task2_features,
+            "label_mode": label_mode,
+            "used_lag_rows": used_lag_rows,
+            "hrt_minutes": hrt_minutes,
+            "sample_interval_minutes": sample_interval_minutes,
         }
 
     @staticmethod
@@ -541,7 +567,7 @@ class FeatureEngineer:
             "pac_dosage",
         ]
         for col in lag_cols:
-            for lag in [1, 2, 3, 6, 12, 18]:
+            for lag in [1, 2, 3, 6, 12, 18, 24]:
                 df[f"{col}_lag{lag}"] = df[col].shift(lag)
         return df
 
@@ -589,26 +615,157 @@ class FeatureEngineer:
         return df
 
     @staticmethod
-    def _add_next_outflow_tp(df: pd.DataFrame) -> pd.DataFrame:
-        """为任务2构建标签：下一次出水TP及变化量"""
+    def _add_next_outflow_tp(
+        df: pd.DataFrame,
+        hrt_minutes: float | None,
+        sample_interval_minutes: float = 5.0,
+    ) -> tuple[pd.DataFrame, str, int]:
+        """
+        为任务2构建标签：下一次出水TP及变化量
+
+        支持两种模式：
+        - 模式A（固定延迟）：hrt_minutes > 0 时，用 outflow_tp.shift(-lag_rows) 构建标签
+        - 模式B（自适应推断）：hrt_minutes 为 None 时，用互相关分析自动推断最佳对齐 lag
+
+        Args:
+            df: 输入数据
+            hrt_minutes: 水力停留时间（分钟），None 表示自动推断
+            sample_interval_minutes: 采样间隔（分钟）
+
+        Returns:
+            (df, label_mode, used_lag_rows)
+        """
         df = df.copy()
-        df["outflow_tp_changed"] = df["outflow_tp"].diff().abs() > 0.001
-        change_indices = df[df["outflow_tp_changed"]].index.tolist()
+        n = len(df)
 
-        df["next_outflow_tp"] = np.nan
-        df["time_to_next_sample"] = np.nan
+        if hrt_minutes is not None and hrt_minutes > 0:
+            lag_rows = max(1, int(round(hrt_minutes / sample_interval_minutes)))
+            label_mode = "fixed_hrt"
+        else:
+            lag_rows = FeatureEngineer._auto_detect_best_lag(
+                df, sample_interval_minutes
+            )
+            label_mode = "auto_detected"
 
-        for i in range(len(change_indices) - 1):
-            start_idx = change_indices[i]
-            end_idx = change_indices[i + 1]
-            next_tp = df.loc[end_idx, "outflow_tp"]
-            for idx in range(start_idx, end_idx):
-                df.loc[idx, "next_outflow_tp"] = next_tp
-                df.loc[idx, "time_to_next_sample"] = end_idx - idx
+        if lag_rows >= n:
+            lag_rows = max(1, n // 4)
 
-        df["next_outflow_tp"] = df["next_outflow_tp"].ffill()
-        df["time_to_next_sample"] = df["time_to_next_sample"].ffill()
+        df["next_outflow_tp"] = df["outflow_tp"].shift(-lag_rows)
         df["tp_delta"] = df["next_outflow_tp"] - df["outflow_tp"]
+
+        return df, label_mode, lag_rows
+
+    @staticmethod
+    def _auto_detect_best_lag(
+        df: pd.DataFrame,
+        sample_interval_minutes: float = 5.0,
+        min_lag_minutes: float = 30.0,
+        max_lag_minutes: float = 360.0,
+    ) -> int:
+        """
+        用互相关分析自动推断 PAC 变化量与 TP 变化量的最佳对齐 lag
+
+        候选 lag 范围：min_lag_minutes 到 max_lag_minutes，选择负相关最强的 lag。
+        优先使用 scipy，没有 scipy 时用 numpy 实现 pearson 相关。
+
+        Returns:
+            最佳 lag 的行数（整数）
+        """
+        min_lag = max(1, int(round(min_lag_minutes / sample_interval_minutes)))
+        max_lag = min(len(df) // 3, int(round(max_lag_minutes / sample_interval_minutes)))
+        if max_lag <= min_lag:
+            return min_lag
+
+        pac_diff = df["pac_dosage"].diff().fillna(0).values
+        tp_diff = df["outflow_tp"].diff().fillna(0).values
+
+        best_lag = min_lag
+        best_corr = 0.0
+
+        try:
+            from scipy.signal import correlate
+
+            pac_norm = (pac_diff - np.mean(pac_diff)) / (np.std(pac_diff) + 1e-12)
+            tp_norm = (tp_diff - np.mean(tp_diff)) / (np.std(tp_diff) + 1e-12)
+            corr = correlate(pac_norm, tp_norm, mode="full") / len(pac_diff)
+            mid = len(pac_diff) - 1
+            for lag in range(min_lag, max_lag + 1):
+                idx = mid + lag
+                if idx < len(corr) and corr[idx] < best_corr:
+                    best_corr = corr[idx]
+                    best_lag = lag
+        except ImportError:
+            def _pearson(x, y):
+                xm = x - np.mean(x)
+                ym = y - np.mean(y)
+                denom = np.sqrt(np.sum(xm ** 2) * np.sum(ym ** 2)) + 1e-12
+                return np.sum(xm * ym) / denom
+
+            for lag in range(min_lag, max_lag + 1):
+                x = pac_diff[:-lag]
+                y = tp_diff[lag:]
+                if len(x) < 10:
+                    break
+                r = _pearson(x, y)
+                if r < best_corr:
+                    best_corr = r
+                    best_lag = lag
+
+        if best_corr >= 0:
+            best_lag = int(round(120.0 / sample_interval_minutes))
+
+        return best_lag
+
+    @staticmethod
+    def _infer_sample_interval(df: pd.DataFrame) -> float:
+        """
+        从数据中自动推断采样间隔（分钟）
+        
+        通过计算timestamp列的中位数时间差来推断实际采样频率
+        """
+        if 'timestamp' not in df.columns or len(df) < 2:
+            return 5.0
+        
+        ts = pd.to_datetime(df['timestamp'])
+        diffs = ts.diff().dropna()
+        
+        if len(diffs) < 2:
+            return 5.0
+        
+        median_diff = float(diffs.median().total_seconds()) / 60.0
+        
+        if median_diff <= 0:
+            return 5.0
+        
+        common_intervals = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60]
+        closest = min(common_intervals, key=lambda x: abs(x - median_diff))
+        
+        return float(closest)
+
+    @staticmethod
+    def _add_pac_effective_features(
+        df: pd.DataFrame,
+        sample_interval_minutes: float = 5.0,
+    ) -> pd.DataFrame:
+        """
+        新增"有效PAC剂量"特征：对PAC做指数衰减加权平均
+
+        tau = 60/120/180/240 分钟，对应不同的响应时间尺度
+        alpha = 1 - exp(-sample_interval_minutes / tau_minutes)
+        """
+        df = df.copy()
+        taus_minutes = [60, 120, 180, 240]
+        pac_values = df["pac_dosage"].values
+        n = len(df)
+
+        for tau in taus_minutes:
+            alpha = 1.0 - np.exp(-sample_interval_minutes / tau)
+            ewma = np.zeros(n)
+            ewma[0] = pac_values[0]
+            for i in range(1, n):
+                ewma[i] = alpha * pac_values[i] + (1 - alpha) * ewma[i - 1]
+            df[f"pac_effective_tau{tau}"] = ewma
+
         return df
 
 
@@ -868,7 +1025,8 @@ class InferencePipeline:
         model2_path: str = "model2_tp_delta.txt",
         features1_path: str = "model1_features.json",
         features2_path: str = "model2_features.json",
-        buffer_size: int = 80,
+        buffer_size: int = 120,
+        sample_interval_minutes: float = 5.0,
     ):
         self.model1 = lgb.Booster(model_file=model1_path)
         self.model2 = lgb.Booster(model_file=model2_path)
@@ -879,6 +1037,7 @@ class InferencePipeline:
             self.features2: List[str] = json.load(f)
 
         self.history: deque = deque(maxlen=buffer_size)
+        self.sample_interval_minutes = sample_interval_minutes
         print(
             f"[推理初始化] 模型1特征: {len(self.features1)}个, 模型2特征: {len(self.features2)}个"
         )
@@ -978,13 +1137,23 @@ class InferencePipeline:
             "pac_dosage": "pac_dosage",
         }
         for col in lag_map:
-            for lag in [1, 2, 3, 6, 12, 18]:
+            for lag in [1, 2, 3, 6, 12, 18, 24]:
                 current[f"{col}_lag{lag}"] = get_lag(lag_map[col], lag)
 
         current["outflow_tp_lag1_above_target"] = (
             1 if get_lag("outflow_tp", 1) > 0.3 else 0
         )
         current["outflow_tp_lag1_deviation"] = get_lag("outflow_tp", 1) - 0.3
+
+        # 有效PAC剂量特征（指数衰减加权平均）
+        pac_values = df["pac_dosage"].values
+        taus = [60, 120, 180, 240]
+        for tau in taus:
+            alpha = 1.0 - np.exp(-self.sample_interval_minutes / tau)
+            ewma = 0.0
+            for i in range(len(pac_values)):
+                ewma = alpha * pac_values[i] + (1 - alpha) * ewma
+            current[f"pac_effective_tau{tau}"] = ewma
 
         # 滑动窗口
         def roll_stats(col, w):
@@ -1026,9 +1195,6 @@ class InferencePipeline:
             for p in [1, 3, 6, 12]:
                 clean_name = actual.replace("_hist", "").replace("_total_avg", "_total_avg")
                 current[f"{clean_name}_diff{p}"] = get_diff(actual, p)
-
-        # time_to_next_sample
-        current["time_to_next_sample"] = max(12 - (len(df) % 12), 1)
 
         return current
 
@@ -1123,6 +1289,11 @@ def normalize_training_config(raw: Dict[str, Any]) -> Dict[str, Any]:
             split.get("val_ratio"), base["split"]["val_ratio"], 0.05, 0.5
         )
     base["seed"] = _clamp_int(raw.get("seed"), base["seed"], 0, 999999)
+
+    # 保留 tp_hrt_minutes（数据预处理参数）
+    tp_hrt = raw.get("tp_hrt_minutes")
+    if tp_hrt is not None:
+        base["tp_hrt_minutes"] = _clamp_float(tp_hrt, None, 1, 1440) if tp_hrt > 0 else None
 
     # Task1 参数
     base["task1"] = _normalize_task_config(raw.get("task1", {}), base["task1"])

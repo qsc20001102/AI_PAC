@@ -132,6 +132,7 @@ async function renderProcessParams(main) {
               ${numberField("pac_min_l_h", "最小 L/h", current.pac_min_l_h, "0", "500", "0.01")}
               ${numberField("pac_max_l_h", "最大 L/h", current.pac_max_l_h, "0", "1000", "0.01")}
               ${numberField("calculation_interval_seconds", "计算周期(s)", current.calculation_interval_seconds, "5", "86400", "1")}
+              ${numberField("tp_hrt_minutes", "出水TP停留时间(分钟)", current.tp_hrt_minutes ?? "", "1", "1440", "1")}
             </div>
             <div class="process-source-title">单耗配置曲线</div>
             ${unitDoseCurveEditor(curve)}
@@ -569,6 +570,7 @@ function formObject(form) {
 
 function processParameterGroupPayload(form) {
   const curve = curveEditorPoints();
+  const hrtRaw = form.elements.tp_hrt_minutes?.value;
   return {
     name: String(form.elements.name.value || "").trim(),
     tp_target_mg_l: Number(form.elements.tp_target_mg_l.value),
@@ -577,6 +579,7 @@ function processParameterGroupPayload(form) {
     pac_min_l_h: Number(form.elements.pac_min_l_h.value),
     pac_max_l_h: Number(form.elements.pac_max_l_h.value),
     calculation_interval_seconds: Number(form.elements.calculation_interval_seconds.value),
+    tp_hrt_minutes: hrtRaw === "" || hrtRaw == null ? null : Number(hrtRaw),
     unit_dose_curve: curve,
   };
 }
@@ -585,18 +588,19 @@ async function createProcessParameterGroup() {
   try {
     const suffix = Date.now().toString().slice(-6);
     const group = await api("/api/process-parameter-groups", {
-      method: "POST",
-      body: JSON.stringify({
-        name: `工艺参数${suffix}`,
-        tp_target_mg_l: 0.18,
-        tp_upper_mg_l: 0.3,
-        pac_density_kg_l: 1.2,
-        pac_min_l_h: 0,
-        pac_max_l_h: 60,
-        calculation_interval_seconds: 60,
-        unit_dose_curve: defaultCurve(),
-      }),
-    });
+        method: "POST",
+        body: JSON.stringify({
+          name: `工艺参数${suffix}`,
+          tp_target_mg_l: 0.18,
+          tp_upper_mg_l: 0.3,
+          pac_density_kg_l: 1.2,
+          pac_min_l_h: 0,
+          pac_max_l_h: 60,
+          calculation_interval_seconds: 60,
+          tp_hrt_minutes: null,
+          unit_dose_curve: defaultCurve(),
+        }),
+      });
     state.selectedProcessParameterGroupId = group.id;
     showToast("参数组已新增");
     await refreshAll();
