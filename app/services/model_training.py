@@ -26,12 +26,9 @@ MODEL_SAMPLE_TIME_FORMATS = (
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d",
 )
-MODEL_KIND_TP_OUT_RESPONSE = "tp_out_response"
-MODEL_KIND_PAC_FLOW_PREDICT = "pac_flow_predict"
+
 MODEL_KIND_AI_PAC_DUAL_TASK = "ai_pac_dual_task"
-SUPPORTED_MODEL_KINDS = {MODEL_KIND_TP_OUT_RESPONSE, MODEL_KIND_PAC_FLOW_PREDICT, MODEL_KIND_AI_PAC_DUAL_TASK}
-TP_FORECAST_TARGET = ("TP_OUT_NEXT", "_training_target_tp_out_next", "下一次出水TP检测数据")
-PAC_FLOW_TARGET = ("PAC_ACTUAL", "_training_target_pac_actual", "实际加药流量")
+SUPPORTED_MODEL_KINDS = {MODEL_KIND_AI_PAC_DUAL_TASK}
 TP_FORECAST_LEGACY_TARGET_ALIASES = (
     "下一次出水TP检测数据",
     "下一次出水TP",
@@ -787,21 +784,6 @@ def train_dual_task_artifact(con, model) -> dict[str, Any]:
     if config_hrt is not None and config_hrt > 0:
         hrt_minutes = float(config_hrt)
 
-    if hrt_minutes is None:
-        dosing_point_id = model_row_value(model, "dosing_point_id")
-        if dosing_point_id is not None:
-            point = con.execute(
-                "SELECT process_parameter_group_id FROM dosing_points WHERE id=?",
-                (int(dosing_point_id),),
-            ).fetchone()
-            if point and point["process_parameter_group_id"]:
-                pg = con.execute(
-                    "SELECT tp_hrt_minutes FROM process_parameter_groups WHERE id=?",
-                    (point["process_parameter_group_id"],),
-                ).fetchone()
-                if pg and pg["tp_hrt_minutes"] is not None and pg["tp_hrt_minutes"] > 0:
-                    hrt_minutes = float(pg["tp_hrt_minutes"])
-
     samples = [
         row_to_dict(row)
         for row in con.execute(
@@ -899,21 +881,6 @@ def export_dual_task_features(con, model) -> bytes:
     config_hrt = raw.get("tp_hrt_minutes") if isinstance(raw, dict) else None
     if config_hrt is not None and config_hrt > 0:
         hrt_minutes = float(config_hrt)
-
-    if hrt_minutes is None:
-        dosing_point_id = model_row_value(model, "dosing_point_id")
-        if dosing_point_id is not None:
-            point = con.execute(
-                "SELECT process_parameter_group_id FROM dosing_points WHERE id=?",
-                (int(dosing_point_id),),
-            ).fetchone()
-            if point and point["process_parameter_group_id"]:
-                pg = con.execute(
-                    "SELECT tp_hrt_minutes FROM process_parameter_groups WHERE id=?",
-                    (point["process_parameter_group_id"],),
-                ).fetchone()
-                if pg and pg["tp_hrt_minutes"] is not None and pg["tp_hrt_minutes"] > 0:
-                    hrt_minutes = float(pg["tp_hrt_minutes"])
 
     samples = [
         row_to_dict(row)

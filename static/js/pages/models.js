@@ -105,8 +105,7 @@ function modelDisplayStatusClass(model) {
 }
 
 function modelKindLabel(model) {
-  if (model?.model_kind === "ai_pac_dual_task") return "智能PAC双任务预测";
-  return model?.model_kind === "pac_flow_predict" ? "加药流量预测" : "下次出水TP预测";
+  return "智能PAC双任务预测";
 }
 
 function renderNewModelWorkspace() {
@@ -117,11 +116,7 @@ function renderNewModelWorkspace() {
       <form id="newModelForm" class="model-create-form">
         <div class="form-grid">
           ${field("name", "模型名称", defaultName, "text")}
-          ${selectField("model_kind", "模型类型", [
-            { value: "tp_out_response", label: "下次出水TP预测" },
-            { value: "pac_flow_predict", label: "加药流量预测" },
-            { value: "ai_pac_dual_task", label: "智能PAC双任务预测" },
-          ], "tp_out_response")}
+          ${hiddenField("model_kind", "ai_pac_dual_task")}
         </div>
         <div class="btn-row"><button class="btn primary" type="submit">创建并配置样本</button><button class="btn" id="cancelNewModelBtn" type="button">取消</button></div>
       </form>
@@ -134,31 +129,23 @@ function renderModelWorkspace(detail) {
   const metrics = model.metrics || {};
   const artifact = model.artifact || {};
   const sampleTargetLabel = modelTargetLabel(model);
-  const deployHintText = model.model_kind === "ai_pac_dual_task"
-    ? "选择后进入双任务AI模式：模型同时预测PAC加药流量和下次出水TP变化量，并自动计算推荐加药流量。"
-    : (model.model_kind === "pac_flow_predict"
-      ? "选择后进入正常模式：模型直接预测实际加药流量，并按工艺参数上下限限幅。"
-      : "选择后仅显示预测TP值：用于查看下一次出水TP检测数据，不直接替代加药流量推荐。");
-  const trainMetricsHtml = model.model_kind === "ai_pac_dual_task"
-    ? (model.trained_at
-      ? `<div class="model-metrics">
-          <span>LightGBM 双任务</span>
-          <span>任务1样本 ${metrics.task1?.samples ?? 0}</span>
-          <span>任务1特征 ${metrics.task1?.feature_count ?? 0}</span>
-          <span>任务2样本 ${metrics.task2?.samples ?? 0}</span>
-          <span>任务2特征 ${metrics.task2?.feature_count ?? 0}</span>
-        </div>
-        <div class="model-metrics">
-          <span>标签模式：${artifact.label_mode === "fixed_hrt" ? "固定HRT" : artifact.label_mode === "auto_detected" ? "自动推断" : "未知"}</span>
-          <span>使用延迟行数：${artifact.used_lag_rows ?? "-"}</span>
-          <span>HRT(分钟)：${artifact.hrt_minutes ?? "自动"}</span>
-          <span>采样间隔(分钟)：${artifact.sample_interval_minutes ?? 5}</span>
-        </div>
-        ${renderDualTaskEvalMetrics(metrics)}`
-      : '<div class="muted">样本数达到 40 条后可开始双任务 LightGBM 训练。</div>')
-    : (model.trained_at
-      ? `<div class="model-metrics"><span>LightGBM</span><span>训练样本 ${metrics.samples ?? 0}</span><span>R² ${fmtCompact(metrics.R2, 4)}</span><span>MAE ${fmtCompact(metrics.MAE, 4)}</span><span>有效特征 ${metrics.feature_count ?? 0}</span><span>${htmlEscape(artifact.file_name || "模型文件已生成")}</span></div>`
-      : '<div class="muted">样本数达到 2 条且覆盖变化工况后可开始 LightGBM 训练。</div>');
+  const deployHintText = "选择后进入双任务AI模式：模型同时预测PAC加药流量和下次出水TP变化量，并自动计算推荐加药流量。";
+  const trainMetricsHtml = model.trained_at
+    ? `<div class="model-metrics">
+        <span>LightGBM 双任务</span>
+        <span>任务1样本 ${metrics.task1?.samples ?? 0}</span>
+        <span>任务1特征 ${metrics.task1?.feature_count ?? 0}</span>
+        <span>任务2样本 ${metrics.task2?.samples ?? 0}</span>
+        <span>任务2特征 ${metrics.task2?.feature_count ?? 0}</span>
+      </div>
+      <div class="model-metrics">
+        <span>标签模式：${artifact.label_mode === "fixed_hrt" ? "固定HRT" : artifact.label_mode === "auto_detected" ? "自动推断" : "未知"}</span>
+        <span>使用延迟行数：${artifact.used_lag_rows ?? "-"}</span>
+        <span>HRT(分钟)：${artifact.hrt_minutes ?? "自动"}</span>
+        <span>采样间隔(分钟)：${artifact.sample_interval_minutes ?? 5}</span>
+      </div>
+      ${renderDualTaskEvalMetrics(metrics)}`
+    : '<div class="muted">样本数达到 40 条后可开始双任务 LightGBM 训练。</div>';
   return `
     <div class="panel-header">
       <div><div class="panel-title">${htmlEscape(model.name)}</div><div class="muted">类型：${modelKindLabel(model)}　状态：<span class="status-tag status-${modelDisplayStatusClass(model)}">${modelDisplayStatusLabel(model)}</span></div></div>
@@ -172,11 +159,11 @@ function renderModelWorkspace(detail) {
         <div class="model-step-actions">
           <button class="btn ghost" id="refreshModelSamplesBtn" type="button">刷新样本</button>
           <button class="btn ghost" id="exportModelSamplesBtn" type="button">导出 CSV</button>
-          ${model.model_kind === "ai_pac_dual_task" && model.sample_count ? '<button class="btn ghost" id="exportModelFeaturesBtn" type="button">导出处理后特征</button>' : ""}
+          ${model.sample_count ? '<button class="btn ghost" id="exportModelFeaturesBtn" type="button">导出处理后特征</button>' : ""}
           <label class="btn primary file-button" for="modelCsvInput">导入 CSV</label><input id="modelCsvInput" type="file" accept=".csv,text/csv" hidden>
           <button class="btn danger" id="clearAllModelSamplesBtn" type="button" ${model.sample_count ? "" : "disabled"}>清空全部样本</button>
         </div>
-        <div class="muted model-sampling-note">已导入 <strong>${model.sample_count || 0}</strong> 条训练样本。${model.model_kind === "ai_pac_dual_task" ? "使用13个原始传感器字段，系统自动完成特征工程（滞后、滚动窗口、差分等）。" : ""}</div>
+        <div class="muted model-sampling-note">已导入 <strong>${model.sample_count || 0}</strong> 条训练样本。使用13个原始传感器字段，系统自动完成特征工程（滞后、滚动窗口、差分等）。</div>
       </section>
 
       <section class="model-step" style="align-self:start;">
@@ -388,7 +375,7 @@ function renderDualTaskTrainingConfig(model, config) {
               ${modelNumberField("sample_interval_minutes", config.sample_interval_minutes ?? "", 1, 1440, "1", model)}
             </div>
             <div class="muted" style="margin-top:8px;">
-              出水TP停留时间：设置后用固定延迟构建标签；不填则自动推断最佳延迟。<br>
+              投加点到出水TP检查点时间：设置后用固定延迟构建标签；不填则自动推断最佳延迟。<br>
               采样间隔：设置后使用固定值；不填则从数据中自动推断。
             </div>
           </div></div>

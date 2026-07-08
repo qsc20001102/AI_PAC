@@ -1290,7 +1290,6 @@ def normalize_training_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         )
     base["seed"] = _clamp_int(raw.get("seed"), base["seed"], 0, 999999)
 
-    # 保留 tp_hrt_minutes（数据预处理参数）
     tp_hrt = raw.get("tp_hrt_minutes")
     if tp_hrt is not None:
         base["tp_hrt_minutes"] = _clamp_float(tp_hrt, None, 1, 1440) if tp_hrt > 0 else None

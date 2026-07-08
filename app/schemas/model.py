@@ -5,13 +5,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-ModelKind = Literal["tp_out_response", "pac_flow_predict", "ai_pac_dual_task"]
+ModelKind = Literal["ai_pac_dual_task"]
 
 
 class ModelProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     dosing_point_id: int | None = None
-    model_kind: ModelKind = "tp_out_response"
+    model_kind: ModelKind = "ai_pac_dual_task"
     training_config: dict[str, Any] = Field(default_factory=dict)
 
 

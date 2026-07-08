@@ -47,7 +47,8 @@ def public_process_parameter_group(row: dict[str, Any]) -> dict[str, Any]:
         "calculation_interval_seconds": row["calculation_interval_seconds"],
         "pac_density_kg_l": row.get("pac_density_kg_l", 1.2),
         "unit_dose_curve": row.get("unit_dose_curve", []),
-        "tp_hrt_minutes": row.get("tp_hrt_minutes"),
+        "tp_forecast_coefficient": row.get("tp_forecast_coefficient", 1.0),
+        "pac_flow_coefficient": row.get("pac_flow_coefficient", 1.0),
         "updated_at": row["updated_at"],
     }
 
@@ -82,7 +83,8 @@ def process_parameter_group_values(payload: ProcessParameterGroupIn) -> tuple[An
         1.0,
         1.0,
         60,
-        payload.tp_hrt_minutes,
+        payload.tp_forecast_coefficient,
+        payload.pac_flow_coefficient,
         utc_now_iso(),
     )
 
@@ -96,8 +98,9 @@ def create_process_parameter_group(payload: ProcessParameterGroupIn) -> dict[str
             INSERT INTO process_parameter_groups(
                 name,tp_target_mg_l,tp_limit_mg_l,tp_upper_mg_l,pac_density_kg_l,unit_dose_curve_json,
                 pac_min_l_h,pac_max_l_h,calculation_interval_seconds,
-                biochemical_phosphorus_removal_efficiency,inflow_delay_minutes,lag_minutes,feedback_kp,feedback_min,feedback_max,feedback_window_minutes,tp_hrt_minutes,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                biochemical_phosphorus_removal_efficiency,inflow_delay_minutes,lag_minutes,feedback_kp,feedback_min,feedback_max,feedback_window_minutes,
+                tp_forecast_coefficient,pac_flow_coefficient,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             process_parameter_group_values(payload),
         )
@@ -119,7 +122,8 @@ def update_process_parameter_group(group_id: int, payload: ProcessParameterGroup
             SET name=?, tp_target_mg_l=?, tp_limit_mg_l=?, tp_upper_mg_l=?, pac_density_kg_l=?, unit_dose_curve_json=?,
                 pac_min_l_h=?, pac_max_l_h=?, calculation_interval_seconds=?,
                 biochemical_phosphorus_removal_efficiency=?, inflow_delay_minutes=?, lag_minutes=?, feedback_kp=?,
-                feedback_min=?, feedback_max=?, feedback_window_minutes=?, tp_hrt_minutes=?, updated_at=?
+                feedback_min=?, feedback_max=?, feedback_window_minutes=?,
+                tp_forecast_coefficient=?, pac_flow_coefficient=?, updated_at=?
             WHERE id=?
             """,
             (*process_parameter_group_values(payload), group_id),

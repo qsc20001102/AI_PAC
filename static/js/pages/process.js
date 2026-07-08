@@ -49,8 +49,6 @@ async function renderProcess(main) {
               ${field("code", "投加点编码", p.code, "text")}
               ${selectField("enabled", "启用状态", [{ value: "true", label: "启用" }, { value: "false", label: "停用" }], String(Boolean(p.enabled)))}
               ${selectField("process_parameter_group_id", "工艺参数组", [{ value: "", label: "无" }, ...processParameterGroups.map((group) => ({ value: String(group.id), label: group.name }))], p.process_parameter_group_id == null ? "" : String(p.process_parameter_group_id))}
-              ${selectField("tp_model_id", "出水TP预测模型", modelSelectOptions(trainedModels, "tp_out_response"), p.tp_model_id == null ? "" : String(p.tp_model_id))}
-              ${selectField("pac_flow_model_id", "加药流量预测模型", modelSelectOptions(trainedModels, "pac_flow_predict"), p.pac_flow_model_id == null ? "" : String(p.pac_flow_model_id))}
               ${selectField("dual_model_id", "智能双任务预测模型", modelSelectOptions(trainedModels, "ai_pac_dual_task"), p.dual_model_id == null ? "" : String(p.dual_model_id))}
             </div>
             <div class="process-source-title">数据来源配置</div>
@@ -132,7 +130,8 @@ async function renderProcessParams(main) {
               ${numberField("pac_min_l_h", "最小 L/h", current.pac_min_l_h, "0", "500", "0.01")}
               ${numberField("pac_max_l_h", "最大 L/h", current.pac_max_l_h, "0", "1000", "0.01")}
               ${numberField("calculation_interval_seconds", "计算周期(s)", current.calculation_interval_seconds, "5", "86400", "1")}
-              ${numberField("tp_hrt_minutes", "出水TP停留时间(分钟)", current.tp_hrt_minutes ?? "", "1", "1440", "1")}
+              ${numberField("tp_forecast_coefficient", "出水TP预测系数", current.tp_forecast_coefficient ?? 1, "0.1", "10", "0.01")}
+              ${numberField("pac_flow_coefficient", "PAC加药流量预测系数", current.pac_flow_coefficient ?? 1, "0.1", "10", "0.01")}
             </div>
             <div class="process-source-title">单耗配置曲线</div>
             ${unitDoseCurveEditor(curve)}
@@ -461,8 +460,6 @@ function defaultNewPoint() {
     bio_do2_tag_id: null,
     bio_mlss1_tag_id: null,
     bio_mlss2_tag_id: null,
-    tp_model_id: null,
-    pac_flow_model_id: null,
     dual_model_id: null,
     process_parameter_group_id: null,
     source_tags: [],
@@ -508,8 +505,6 @@ function pointFormPayload(form) {
   processSourceFields.forEach(([name]) => {
     payload[name] = payload[name] == null ? null : Number(payload[name]);
   });
-  payload.tp_model_id = payload.tp_model_id == null ? null : Number(payload.tp_model_id);
-  payload.pac_flow_model_id = payload.pac_flow_model_id == null ? null : Number(payload.pac_flow_model_id);
   payload.dual_model_id = payload.dual_model_id == null ? null : Number(payload.dual_model_id);
   payload.process_parameter_group_id = payload.process_parameter_group_id == null ? null : Number(payload.process_parameter_group_id);
   return payload;
@@ -570,7 +565,6 @@ function formObject(form) {
 
 function processParameterGroupPayload(form) {
   const curve = curveEditorPoints();
-  const hrtRaw = form.elements.tp_hrt_minutes?.value;
   return {
     name: String(form.elements.name.value || "").trim(),
     tp_target_mg_l: Number(form.elements.tp_target_mg_l.value),
@@ -579,7 +573,8 @@ function processParameterGroupPayload(form) {
     pac_min_l_h: Number(form.elements.pac_min_l_h.value),
     pac_max_l_h: Number(form.elements.pac_max_l_h.value),
     calculation_interval_seconds: Number(form.elements.calculation_interval_seconds.value),
-    tp_hrt_minutes: hrtRaw === "" || hrtRaw == null ? null : Number(hrtRaw),
+    tp_forecast_coefficient: Number(form.elements.tp_forecast_coefficient.value),
+    pac_flow_coefficient: Number(form.elements.pac_flow_coefficient.value),
     unit_dose_curve: curve,
   };
 }
@@ -597,7 +592,8 @@ async function createProcessParameterGroup() {
           pac_min_l_h: 0,
           pac_max_l_h: 60,
           calculation_interval_seconds: 60,
-          tp_hrt_minutes: null,
+          tp_forecast_coefficient: 1.0,
+          pac_flow_coefficient: 1.0,
           unit_dose_curve: defaultCurve(),
         }),
       });

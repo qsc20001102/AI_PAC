@@ -352,8 +352,6 @@ def validate_dosing_point_payload(con, payload: DosingPointCreate | DosingPointU
         params = con.execute("SELECT id FROM process_parameter_groups WHERE id=?", (payload.process_parameter_group_id,)).fetchone()
         if not params:
             raise HTTPException(422, "工艺参数组不存在")
-    validate_point_model_selection(con, payload.tp_model_id, "tp_out_response", "出水TP预测模型")
-    validate_point_model_selection(con, payload.pac_flow_model_id, "pac_flow_predict", "加药流量预测模型")
     validate_point_model_selection(con, payload.dual_model_id, "ai_pac_dual_task", "智能双任务预测模型")
 
 

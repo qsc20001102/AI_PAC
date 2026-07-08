@@ -354,7 +354,7 @@ def model_project_rows(con) -> list[dict[str, Any]]:
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
         LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
-        WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict','ai_pac_dual_task')
+        WHERE mp.model_kind IN ('ai_pac_dual_task')
         ORDER BY mp.updated_at DESC, mp.id DESC
         """
     ).fetchall()
@@ -370,7 +370,7 @@ def model_project_summary_rows(con) -> list[dict[str, Any]]:
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
         FROM model_projects mp
         LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
-        WHERE mp.model_kind IN ('tp_out_response','pac_flow_predict','ai_pac_dual_task')
+        WHERE mp.model_kind IN ('ai_pac_dual_task')
         ORDER BY CASE mp.status WHEN 'published' THEN 0 WHEN 'ready' THEN 1 ELSE 2 END,
                  mp.updated_at DESC,mp.id DESC
         """

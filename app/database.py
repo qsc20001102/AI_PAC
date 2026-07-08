@@ -160,7 +160,8 @@ CREATE TABLE IF NOT EXISTS process_parameter_groups (
     feedback_min REAL NOT NULL,
     feedback_max REAL NOT NULL,
     feedback_window_minutes INTEGER NOT NULL,
-    tp_hrt_minutes REAL,
+    tp_forecast_coefficient REAL NOT NULL DEFAULT 1.0,
+    pac_flow_coefficient REAL NOT NULL DEFAULT 1.0,
     updated_at TEXT NOT NULL
 );
 
@@ -362,7 +363,6 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             feedback_min REAL NOT NULL,
             feedback_max REAL NOT NULL,
             feedback_window_minutes INTEGER NOT NULL,
-            tp_hrt_minutes REAL,
             updated_at TEXT NOT NULL
         );
 
@@ -445,7 +445,8 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
             "forecast_horizon_minutes": "INTEGER NOT NULL DEFAULT 120",
             "biochemical_phosphorus_removal_efficiency": "REAL NOT NULL DEFAULT 0.7",
             "inflow_delay_minutes": "INTEGER NOT NULL DEFAULT 0",
-            "tp_hrt_minutes": "REAL",
+            "tp_forecast_coefficient": "REAL NOT NULL DEFAULT 1.0",
+            "pac_flow_coefficient": "REAL NOT NULL DEFAULT 1.0",
         },
     )
     con.execute("UPDATE dosing_points SET phosphorus_source='po4' WHERE phosphorus_source='po4_priority'")
@@ -684,8 +685,8 @@ def backfill_parameter_groups(con: sqlite3.Connection) -> None:
                     name,tp_target_mg_l,tp_limit_mg_l,tp_upper_mg_l,pac_density_kg_l,unit_dose_curve_json,forecast_horizon_minutes,
                     biochemical_phosphorus_removal_efficiency,
                     pac_min_l_h,pac_max_l_h,calculation_interval_seconds,inflow_delay_minutes,
-                    lag_minutes,feedback_kp,feedback_min,feedback_max,feedback_window_minutes,tp_hrt_minutes,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    lag_minutes,feedback_kp,feedback_min,feedback_max,feedback_window_minutes,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     name,
@@ -705,7 +706,6 @@ def backfill_parameter_groups(con: sqlite3.Connection) -> None:
                     row["feedback_min"],
                     row["feedback_max"],
                     row["feedback_window_minutes"],
-                    None,
                     row["updated_at"] or now,
                 ),
             )

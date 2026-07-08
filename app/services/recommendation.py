@@ -694,6 +694,9 @@ def calculate_for_point(
     mode = "conservative"
     ai_detail: dict[str, Any] | None = None
 
+    pac_flow_coeff = float(control.get("pac_flow_coefficient", 1.0))
+    tp_forecast_coeff = float(control.get("tp_forecast_coefficient", 1.0))
+
     # 优先检查双任务模型
     dual_model_row = dual_task_model(con, dosing_point_id) if ai_enabled else None
     if dual_model_row:
@@ -701,15 +704,15 @@ def calculate_for_point(
         if history_df is not None and len(history_df) >= 36:
             predicted_pac, predicted_next_tp, detail, error = predict_dual_task_model(dual_model_row, history_df)
             if predicted_pac is not None:
-                raw = predicted_pac
+                raw = predicted_pac * pac_flow_coeff
                 mode = "dual_task_ai"
                 ai_detail = detail
-                reasons.append(f"双任务AI模式：投用模型 {dual_model_row['name']}，PAC预测 {predicted_pac:.4g} L/h，下次出水TP预测 {predicted_next_tp:.4g} mg/L")
+                reasons.append(f"双任务AI模式：投用模型 {dual_model_row['name']}，PAC预测 {predicted_pac:.4g} L/h × 系数 {pac_flow_coeff:.4g} = {raw:.4g} L/h，下次出水TP预测 {predicted_next_tp:.4g} mg/L × 系数 {tp_forecast_coeff:.4g} = {predicted_next_tp * tp_forecast_coeff:.4g} mg/L")
                 # 构造tp_forecast
                 tp_forecast = {
                     "model_id": dual_model_row["id"],
                     "model_name": dual_model_row["name"],
-                    "predicted_tp_out": round(predicted_next_tp, 4) if predicted_next_tp is not None else None,
+                    "predicted_tp_out": round(predicted_next_tp * tp_forecast_coeff, 4) if predicted_next_tp is not None else None,
                     "target_label": "下次出水TP预测",
                     "detail": detail,
                 }
@@ -718,20 +721,7 @@ def calculate_for_point(
         else:
             reasons.append("双任务模型历史数据不足，回退保守模式")
     else:
-        # 原有单任务模型逻辑
-        pac_model = active_model(con, dosing_point_id, "pac_flow_predict") if ai_enabled else None
-        if pac_model:
-            target_tp_value = float(control["tp_target_mg_l"])
-            predicted_pac, detail, error = predict_pac_flow_model(pac_model, data, {"TP_OUT": target_tp_value})
-            if predicted_pac is not None:
-                raw = predicted_pac
-                mode = "normal"
-                ai_detail = detail
-                reasons.append(f"正常模式：投用加药流量预测模型 {pac_model['name']}，将模型输入中的出水TP由当前值 {current_tp_value:.4g} mg/L 替换为目标TP {target_tp_value:.4g} mg/L，预测目标TP对应加药流量 {predicted_pac:.4g} L/h")
-            else:
-                reasons.append(error or "加药流量预测模型不可用，回退保守模式")
-        else:
-            reasons.append("无投用加药流量预测模型，使用保守模式纯计算")
+        reasons.append("无投用双任务模型，使用保守模式纯计算")
 
     if mode == "conservative" and current_tp_value > float(control["tp_upper_mg_l"]):
         final = float(control["pac_max_l_h"])
