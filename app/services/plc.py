@@ -200,6 +200,14 @@ def parse_modbus_address(address: str, data_type: str) -> dict[str, Any]:
 
     type_size = {"REAL": 2, "BOOL": 1, "INT": 1, "DINT": 2, "UINT": 1}[normalized_type]
 
+    # 数据类型与寄存器类型校验
+    if normalized_type in {"REAL", "INT", "DINT", "UINT"}:
+        if register_type not in {"holding", "input"}:
+            raise ValueError(f"{normalized_type} 类型只能使用保持寄存器(4xxxx)或输入寄存器(3xxxx)地址")
+    elif normalized_type == "BOOL":
+        if register_type not in {"coil", "discrete"}:
+            raise ValueError("BOOL 类型只能使用线圈(0xxxx)或离散输入(1xxxx)地址")
+
     return {
         "register_type": register_type,
         "register_number": register_number,
@@ -323,37 +331,39 @@ def read_modbus_value(
     else:
         raise ValueError("Modbus 数据类型只支持 BOOL、INT、UINT、DINT、REAL")
 
+    # 数据类型与寄存器类型校验
+    if normalized_type in {"REAL", "INT", "DINT", "UINT"}:
+        if not (is_holding or is_input):
+            raise ValueError(f"{normalized_type} 类型只能使用保持寄存器(4xxxx)或输入寄存器(3xxxx)地址")
+    elif normalized_type == "BOOL":
+        if not (is_coil or is_discrete):
+            raise ValueError("BOOL 类型只能使用线圈(0xxxx)或离散输入(1xxxx)地址")
+
     # 读取数据
     if is_coil:
         # 读取线圈（Function Code 01）
-        result = client.read_coils(register_number, register_count, slave=unit_id)
+        result = client.read_coils(address=register_number, count=register_count, device_id=unit_id)
         if result.isError():
             raise ValueError(f"读取线圈失败：{result}")
         coil_values = result.bits[:register_count]
-        if normalized_type == "BOOL":
-            value = bool(coil_values[0])
-        else:
-            raise ValueError("线圈只能读取 BOOL 类型")
+        value = bool(coil_values[0])
     elif is_discrete:
         # 读取离散输入（Function Code 02）
-        result = client.read_discrete_inputs(register_number, register_count, slave=unit_id)
+        result = client.read_discrete_inputs(address=register_number, count=register_count, device_id=unit_id)
         if result.isError():
             raise ValueError(f"读取离散输入失败：{result}")
         discrete_values = result.bits[:register_count]
-        if normalized_type == "BOOL":
-            value = bool(discrete_values[0])
-        else:
-            raise ValueError("离散输入只能读取 BOOL 类型")
+        value = bool(discrete_values[0])
     elif is_holding:
         # 读取保持寄存器（Function Code 03）
-        result = client.read_holding_registers(register_number, register_count, slave=unit_id)
+        result = client.read_holding_registers(address=register_number, count=register_count, device_id=unit_id)
         if result.isError():
             raise ValueError(f"读取保持寄存器失败：{result}")
         registers = result.registers
         value = decode_modbus_registers(registers, normalized_type, byte_order)
     elif is_input:
         # 读取输入寄存器（Function Code 04）
-        result = client.read_input_registers(register_number, register_count, slave=unit_id)
+        result = client.read_input_registers(address=register_number, count=register_count, device_id=unit_id)
         if result.isError():
             raise ValueError(f"读取输入寄存器失败：{result}")
         registers = result.registers
