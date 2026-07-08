@@ -694,8 +694,8 @@ def calculate_for_point(
     mode = "conservative"
     ai_detail: dict[str, Any] | None = None
 
-    pac_flow_coeff = float(control.get("pac_flow_coefficient", 1.0))
-    tp_forecast_coeff = float(control.get("tp_forecast_coefficient", 1.0))
+    pac_flow_coeff = float(control["pac_flow_coefficient"]) if "pac_flow_coefficient" in control.keys() else 1.0
+    tp_forecast_coeff = float(control["tp_forecast_coefficient"]) if "tp_forecast_coefficient" in control.keys() else 1.0
 
     # 优先检查双任务模型
     dual_model_row = dual_task_model(con, dosing_point_id) if ai_enabled else None
