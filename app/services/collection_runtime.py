@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException
 
 from app.api.common import row_to_dict
-from app.database import db_session, utc_now_iso
+from app.database import db_session, utc_now, utc_now_iso
 from app.schemas import CollectionTagUpdate
 from app.services.plc import parse_s7_address, read_s7_value
 from app.services.plc_devices import ensure_plc_runtime_client
 from app.services.recommendation import calculate_for_point
+
+logger = logging.getLogger(__name__)
 
 
 def validate_collection_payload(payload: CollectionTagUpdate) -> None:
@@ -74,7 +77,8 @@ async def collection_loop() -> None:
                     poll_collection_rows(con, rows)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as e:  # P0-3 修复：原代码静默吞掉所有异常，生产环境无法排查
+            logger.error("采集循环异常: %s", e, exc_info=True)
             continue
 
 
@@ -105,7 +109,7 @@ def collection_due_rows(
     ).fetchall()
     if force:
         return rows
-    now = datetime.now()
+    now = utc_now()  # P1-1: 统一 UTC
     due = []
     for row in rows:
         last_read = parse_iso_dt(row["last_read_at"])
@@ -119,8 +123,25 @@ def poll_collection_rows(con, rows: list[Any], force_history: bool = False) -> d
     read_failed = 0
     history_written = 0
     affected_points: set[int] = set()
-    now = datetime.now().replace(microsecond=0)
+    now = utc_now().replace(microsecond=0)  # P1-1: 统一 UTC
     now_iso = now.isoformat()
+
+    # P1-3 修复：原代码在循环内对每个 tag 单独查 plc_devices，存在 N+1 查询。
+    # 此处先按 device_id 批量预加载所有需要的设备协议信息，循环内直接查字典。
+    device_ids: set[int] = set()
+    for row in rows:
+        did = row["plc_device_id"]
+        if did is not None:
+            device_ids.add(int(did))
+    device_info_map: dict[int, Any] = {}
+    if device_ids:
+        placeholders = ",".join("?" for _ in device_ids)
+        for drow in con.execute(
+            f"SELECT id, protocol, byte_order, unit_id FROM plc_devices WHERE id IN ({placeholders})",
+            tuple(device_ids),
+        ).fetchall():
+            device_info_map[int(drow["id"])] = drow
+
     for row in rows:
         tag_id = int(row["id"])
         point_id = int(row["dosing_point_id"]) if row["dosing_point_id"] is not None else None
@@ -137,10 +158,7 @@ def poll_collection_rows(con, rows: list[Any], force_history: bool = False) -> d
             read_failed += 1
             continue
         try:
-            device_info = con.execute(
-                "SELECT protocol, byte_order, unit_id FROM plc_devices WHERE id=?",
-                (device_id,),
-            ).fetchone()
+            device_info = device_info_map.get(device_id)
             if device_info and device_info["protocol"] == "modbus_tcp":
                 from app.services.plc import read_modbus_value
                 result = read_modbus_value(

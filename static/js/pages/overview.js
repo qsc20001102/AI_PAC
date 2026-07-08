@@ -1,3 +1,7 @@
+// P3-14/P3-17 修复：图表标记点最大数量，超过则按步长间隔取点，避免点位密集时重叠渲染。
+// 原代码以裸魔法数字 24 出现在 drawSavingsChart 与 drawChart 两处，提取为命名常量便于统一调整。
+const MARKER_MAX_COUNT = 24;
+
 async function renderOverview(main) {
   const recs = state.dashboard.recommendations;
   if (!recs.length) {
@@ -252,15 +256,8 @@ function renderLegend(legendId, keys) {
 
 function drawSavingsChart(canvas, series, keys, tooltipId) {
   if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.max(1, Math.round(rect.width * dpr));
-  canvas.height = Math.max(1, Math.round(rect.height * dpr));
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-  const w = canvas.width / dpr;
-  const h = canvas.height / dpr;
-  ctx.clearRect(0, 0, w, h);
+  // P2-6 修复：Canvas DPR 设置抽取到 setupChartCanvas
+  const { ctx, w, h } = setupChartCanvas(canvas);
   const pad = { l: 50, r: 14, t: 12, b: 32 };
   const plotW = w - pad.l - pad.r;
   const plotH = h - pad.t - pad.b;
@@ -326,7 +323,7 @@ function drawSavingsChart(canvas, series, keys, tooltipId) {
     if (points.length > 1) ctx.stroke();
 
     ctx.fillStyle = "#2563eb";
-    const markerStep = Math.max(1, Math.ceil(points.length / 24));
+    const markerStep = Math.max(1, Math.ceil(points.length / MARKER_MAX_COUNT));
     points.forEach((p, idx) => {
       if (idx % markerStep !== 0 && idx !== points.length - 1) return;
       const x = pad.l + ((p.t - minT) / Math.max(maxT - minT, 1)) * plotW;
@@ -346,20 +343,13 @@ function drawSavingsChart(canvas, series, keys, tooltipId) {
     ctx.fillText(`${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`, x - 16, h - 10);
   });
 
-  wireChartTooltip(canvas, tooltipId, chartPoints);
+  wireChartTooltip(canvas, tooltipId, chartPoints, (p) => p.label || "节省差值 (L/h)");
 }
 
 function drawChart(canvas, series, keys, tooltipId) {
   if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.max(1, Math.round(rect.width * dpr));
-  canvas.height = Math.max(1, Math.round(rect.height * dpr));
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-  const w = canvas.width / dpr;
-  const h = canvas.height / dpr;
-  ctx.clearRect(0, 0, w, h);
+  // P2-6 修复：Canvas DPR 设置抽取到 setupChartCanvas
+  const { ctx, w, h } = setupChartCanvas(canvas);
   const pad = { l: 50, r: 14, t: 12, b: 32 };
   const plotW = w - pad.l - pad.r;
   const plotH = h - pad.t - pad.b;
@@ -417,7 +407,7 @@ function drawChart(canvas, series, keys, tooltipId) {
     if (points.length > 1) ctx.stroke();
     ctx.setLineDash([]);
 
-    const markerStep = Math.max(1, Math.ceil(points.length / 24));
+    const markerStep = Math.max(1, Math.ceil(points.length / MARKER_MAX_COUNT));
     ctx.fillStyle = seriesStyle[key].color;
     points.forEach((p, idx) => {
       if (idx % markerStep !== 0 && idx !== points.length - 1) return;
@@ -438,37 +428,10 @@ function drawChart(canvas, series, keys, tooltipId) {
     ctx.fillText(`${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`, x - 16, h - 10);
   });
 
-  wireChartTooltip(canvas, tooltipId, chartPoints);
+  wireChartTooltip(canvas, tooltipId, chartPoints, (p) => p.label || seriesStyle[p.key]?.label || p.key);
 }
 
-function wireChartTooltip(canvas, tooltipId, chartPoints) {
-  const tooltip = document.getElementById(tooltipId);
-  if (!canvas || !tooltip) return;
-  canvas.onmousemove = (event) => {
-    const rect = canvas.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-    let nearest = null;
-    let best = 13;
-    chartPoints.forEach((point) => {
-      const distance = Math.hypot(point.x - x, point.y - y);
-      if (distance < best) {
-        best = distance;
-        nearest = point;
-      }
-    });
-    if (!nearest) {
-      tooltip.classList.remove("show");
-      return;
-    }
-    const label = nearest.label || seriesStyle[nearest.key]?.label || nearest.key;
-    tooltip.innerHTML = `<b>${htmlEscape(label)}</b><br>${dateMinute(nearest.time)}<br>${fmtCompact(nearest.value, 4)}`;
-    tooltip.style.left = `${Math.min(x + 12, rect.width - 170)}px`;
-    tooltip.style.top = `${Math.max(y - 62, 6)}px`;
-    tooltip.classList.add("show");
-  };
-  canvas.onmouseleave = () => tooltip.classList.remove("show");
-}
+// P2-6 修复：wireChartTooltip 已移至 format.js，通过 labelFor 回调适配不同标签来源。
 
 function toDateTimeLocal(date) {
   const pad = (n) => String(n).padStart(2, "0");

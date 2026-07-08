@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.staticfiles import StaticFiles as StarletteStaticFiles
-from starlette.responses import Response
 
 from app.api.alarms import router as alarms_router
 from app.api.auth import router as auth_router
@@ -40,28 +38,12 @@ from app.services.settings_config import get_plc_auto_connect_enabled
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 
-app = FastAPI(
-    title="智能污水除磷药系统",
-    version="0.1.0",
-    description="本地部署的智能污水除磷药系统，输出可解释、可限幅、可回退的建议 L/h。",
-)
 
-app.include_router(health_router)
-app.include_router(auth_router)
-app.include_router(alarms_router)
-app.include_router(process_groups_router)
-app.include_router(settings_router)
-app.include_router(models_router)
-app.include_router(dashboard_router)
-app.include_router(dosing_points_router)
-app.include_router(plc_router)
-app.include_router(collection_router)
-app.include_router(ingest_router)
-app.include_router(trends_router)
-
-
-@app.on_event("startup")
-def startup() -> None:
+# P2-1 修复：将废弃的 @app.on_event("startup"/"shutdown") 迁移到 FastAPI lifespan 上下文管理器。
+# P2-2 修复：移除未使用的 from starlette.responses import Response 和 from fastapi.staticfiles import StaticFiles。
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ---- startup ----
     init_schema()
     ensure_default_users()
     plc_client_store().clear()
@@ -82,9 +64,9 @@ def startup() -> None:
         recalculate_all(con)
     app.state.collector_task = asyncio.create_task(collection_loop())
 
+    yield
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
+    # ---- shutdown ----
     task = getattr(app.state, "collector_task", None)
     if task:
         task.cancel()
@@ -93,6 +75,27 @@ async def shutdown() -> None:
     for client in list(plc_client_store().values()):
         disconnect_client(client)
     plc_client_store().clear()
+
+
+app = FastAPI(
+    title="智能污水除磷药系统",
+    version="0.1.0",
+    description="本地部署的智能污水除磷药系统，输出可解释、可限幅、可回退的建议 L/h。",
+    lifespan=lifespan,
+)
+
+app.include_router(health_router)
+app.include_router(auth_router)
+app.include_router(alarms_router)
+app.include_router(process_groups_router)
+app.include_router(settings_router)
+app.include_router(models_router)
+app.include_router(dashboard_router)
+app.include_router(dosing_points_router)
+app.include_router(plc_router)
+app.include_router(collection_router)
+app.include_router(ingest_router)
+app.include_router(trends_router)
 
 
 class NoCacheStaticFiles(StarletteStaticFiles):

@@ -345,16 +345,22 @@ def model_project_or_404(con, model_id: int):
     return row
 
 
+# P2-4 修复：model_project_rows 与 model_project_summary_rows 的 FROM/JOIN/WHERE 子句重复，抽取为常量。
+_MODEL_PROJECT_FROM_WHERE = """
+    FROM model_projects mp
+    LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
+    WHERE mp.model_kind IN ('ai_pac_dual_task')
+"""
+
+
 def model_project_rows(con) -> list[dict[str, Any]]:
     rows = con.execute(
-        """
+        f"""
         SELECT mp.id,mp.name,mp.model_kind,mp.dosing_point_id,mp.status,
             mp.trained_at,mp.published_by,mp.published_at,mp.created_at,mp.updated_at,mp.metrics_json,
             dp.name AS dosing_point_name, dp.code AS dosing_point_code,
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
-        FROM model_projects mp
-        LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
-        WHERE mp.model_kind IN ('ai_pac_dual_task')
+        {_MODEL_PROJECT_FROM_WHERE}
         ORDER BY mp.updated_at DESC, mp.id DESC
         """
     ).fetchall()
@@ -363,14 +369,12 @@ def model_project_rows(con) -> list[dict[str, Any]]:
 
 def model_project_summary_rows(con) -> list[dict[str, Any]]:
     rows = con.execute(
-        """
+        f"""
         SELECT mp.id,mp.name,mp.model_kind,mp.dosing_point_id,mp.status,
             mp.trained_at,mp.published_at,mp.metrics_json,
             dp.name AS dosing_point_name,
             (SELECT COUNT(*) FROM model_training_samples ms WHERE ms.model_project_id=mp.id) AS sample_count
-        FROM model_projects mp
-        LEFT JOIN dosing_points dp ON dp.id=mp.dosing_point_id
-        WHERE mp.model_kind IN ('ai_pac_dual_task')
+        {_MODEL_PROJECT_FROM_WHERE}
         ORDER BY CASE mp.status WHEN 'published' THEN 0 WHEN 'ready' THEN 1 ELSE 2 END,
                  mp.updated_at DESC,mp.id DESC
         """

@@ -1,8 +1,24 @@
-async function boot() {
-  for (let i = 1; i < 99999; i++) {
-    window.clearInterval(i);
-    window.clearTimeout(i);
+// P2-9/P2-10 修复：原代码 for(i=1;i<99999;i++) clearInterval/clearTimeout 是极端 hack，
+// 且 setInterval 返回值未保存，无法在页面切换或重新启动时精确清理。
+// 改为维护已注册的定时器 ID 列表，清理时遍历该列表精确清除。
+const _registeredTimers = [];
+
+function registerInterval(fn, ms) {
+  const id = window.setInterval(fn, ms);
+  _registeredTimers.push(id);
+  return id;
+}
+
+function clearRegisteredTimers() {
+  while (_registeredTimers.length) {
+    const id = _registeredTimers.pop();
+    window.clearInterval(id);
   }
+}
+
+async function boot() {
+  // 清理上一轮 boot 注册的定时器（如热重载场景），避免重复触发
+  clearRegisteredTimers();
   await initAuth();
   const hashPage = window.location.hash.slice(2);
   if (hashPage && ["overview", "process", "processParams", "models", "plc", "data", "trends", "alarms", "settings"].includes(hashPage)) {
@@ -11,10 +27,10 @@ async function boot() {
   renderNav();
   renderUserArea();
   tickClock();
-  window.setInterval(tickClock, 1000);
+  registerInterval(tickClock, 1000);
   await refreshAll();
-  window.setInterval(refreshDashboardOnly, 30000);
-  window.setInterval(refreshCollectionRealtime, 2000);
+  registerInterval(refreshDashboardOnly, 30000);
+  registerInterval(refreshCollectionRealtime, 2000);
 }
 
 async function initAuth() {

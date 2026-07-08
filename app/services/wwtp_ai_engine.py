@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import warnings
 from collections import deque
@@ -19,44 +20,21 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-warnings.filterwarnings("ignore")
+from app.services import feature_schema
+
+# P3-19 修复：不再全局禁用所有警告，仅抑制 lightgbm 在生产环境下的告警噪声。
+warnings.filterwarnings("ignore", category=UserWarning, module="lightgbm")
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # 常量定义
 # ============================================================
-RAW_COLS = [
-    "timestamp",
-    "inflow_flow",
-    "inflow_tp",
-    "inflow_ph",
-    "outflow_tp",
-    "high_density_a1_return",
-    "high_density_a2_return",
-    "orp_east_1",
-    "orp_east_2",
-    "orp_west_1",
-    "orp_west_2",
-    "mlss_east",
-    "mlss_west",
-    "pac_dosage",
-]
+# P1-6：RAW_COLS / TAG_TO_RAW_MAP 改为从 feature_schema 单一数据源派生。
+RAW_COLS = feature_schema.raw_cols()
 
 # 与现有系统 sensor_tag 的映射（用于从数据库读取数据时转换）
-TAG_TO_RAW_MAP = {
-    "Q": "inflow_flow",
-    "TP_BEFORE": "inflow_tp",
-    "PH": "inflow_ph",
-    "TP_OUT": "outflow_tp",
-    "REFLUX_Q1": "high_density_a1_return",
-    "REFLUX_Q2": "high_density_a2_return",
-    "BIO_ORP1": "orp_east_1",
-    "BIO_ORP2": "orp_east_2",
-    "BIO_ORP3": "orp_west_1",
-    "BIO_ORP4": "orp_west_2",
-    "BIO_MLSS1": "mlss_east",
-    "BIO_MLSS2": "mlss_west",
-    "PAC_ACTUAL": "pac_dosage",
-}
+TAG_TO_RAW_MAP = feature_schema.tag_to_raw_map()
 
 RAW_TO_TAG_MAP = {v: k for k, v in TAG_TO_RAW_MAP.items()}
 
@@ -121,7 +99,7 @@ class DataImporter:
         for enc in cls.SUPPORTED_ENCODINGS:
             try:
                 df = pd.read_csv(csv_path, encoding=enc)
-                print(f"[数据导入] 成功使用编码: {enc}")
+                logger.info("[数据导入] 成功使用编码: %s", enc)
                 break
             except UnicodeDecodeError:
                 continue
@@ -150,8 +128,9 @@ class DataImporter:
         # 按时间排序
         df = df.sort_values("timestamp").reset_index(drop=True)
 
-        print(
-            f"[数据导入] 共 {len(df)} 条记录，时间范围: {df['timestamp'].min()} ~ {df['timestamp'].max()}"
+        logger.info(
+            "[数据导入] 共 %d 条记录，时间范围: %s ~ %s",
+            len(df), df["timestamp"].min(), df["timestamp"].max(),
         )
 
         # 数据清洗
@@ -235,7 +214,7 @@ class DataImporter:
 
         if renamed:
             df = df.rename(columns=renamed)
-            print(f"[字段映射] 自动映射 {len(renamed)} 个字段")
+            logger.info("[字段映射] 自动映射 %d 个字段", len(renamed))
 
         return df
 
@@ -271,7 +250,7 @@ class DataImporter:
         df = df.dropna().reset_index(drop=True)
         after = len(df)
         if before != after:
-            print(f"[数据清洗] 删除 {before - after} 条含NaN记录，剩余 {after} 条")
+            logger.info("[数据清洗] 删除 %d 条含NaN记录，剩余 %d 条", before - after, after)
 
         return df
 
@@ -308,7 +287,7 @@ class FeatureEngineer:
         if sample_interval_minutes <= 0 and 'timestamp' in df.columns:
             inferred_interval = FeatureEngineer._infer_sample_interval(df)
             sample_interval_minutes = inferred_interval
-            print(f"[特征工程] 自动推断采样间隔: {inferred_interval:.1f} 分钟")
+            logger.info("[特征工程] 自动推断采样间隔: %.1f 分钟", inferred_interval)
         
         df = FeatureEngineer._add_interaction_features(df)
         df = FeatureEngineer._add_lag_features(df)
@@ -797,22 +776,27 @@ class ModelTrainer:
         mape = np.mean(np.abs((y_true - y_pred) / (np.abs(y_true) + 0.001))) * 100
         return {"name": name, "rmse": rmse, "mae": mae, "r2": r2, "mape": mape}
 
-    def train_task1(
-        self, df: pd.DataFrame, feature_cols: List[str], output_dir: str = "."
-    ) -> tuple[lgb.Booster, dict[str, Any]]:
-        """训练任务1：PAC加药量预测，返回模型和评估指标"""
-        print("\n" + "=" * 60)
-        print("训练任务1: PAC加药量预测")
-        print("=" * 60)
-
+    def _train_booster(
+        self,
+        df: pd.DataFrame,
+        feature_cols: List[str],
+        target_col: str,
+        cfg_key: str,
+        model_filename: str,
+        features_filename: str,
+        output_dir: str,
+        log_label: str,
+    ) -> tuple[lgb.Booster, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """P2-5 修复：train_task1/train_task2 的数据切分、参数构建、lgb训练、模型保存逻辑重复，抽取公共方法。
+        返回 (model, X_train, X_val, X_test, y_train, y_val, y_test)。评估逻辑由调用方按任务差异自行实现。"""
+        logger.info(log_label)
         train_df, val_df, test_df = self._time_split(df)
-        X_train, y_train = train_df[feature_cols], train_df["pac_dosage"]
-        X_val, y_val = val_df[feature_cols], val_df["pac_dosage"]
-        X_test, y_test = test_df[feature_cols], test_df["pac_dosage"]
+        X_train, y_train = train_df[feature_cols], train_df[target_col]
+        X_val, y_val = val_df[feature_cols], val_df[target_col]
+        X_test, y_test = test_df[feature_cols], test_df[target_col]
+        logger.info("训练集: %d | 验证集: %d | 测试集: %d", len(train_df), len(val_df), len(test_df))
 
-        print(f"训练集: {len(train_df)} | 验证集: {len(val_df)} | 测试集: {len(test_df)}")
-
-        cfg = self.config["task1"]
+        cfg = self.config[cfg_key]
         params = {
             "objective": "regression",
             "metric": "rmse",
@@ -835,7 +819,6 @@ class ModelTrainer:
 
         train_data = lgb.Dataset(X_train, label=y_train)
         val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
-
         model = lgb.train(
             params,
             train_data,
@@ -848,6 +831,28 @@ class ModelTrainer:
                 ),
                 lgb.log_evaluation(period=0),
             ],
+        )
+
+        # 保存模型与特征列表
+        model_path = os.path.join(output_dir, model_filename)
+        model.save_model(model_path)
+        with open(
+            os.path.join(output_dir, features_filename),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(feature_cols, f, ensure_ascii=False, indent=2)
+        logger.info("[模型保存] %s", model_path)
+        return model, X_train, X_val, X_test, y_train, y_val, y_test
+
+    def train_task1(
+        self, df: pd.DataFrame, feature_cols: List[str], output_dir: str = "."
+    ) -> tuple[lgb.Booster, dict[str, Any]]:
+        """训练任务1：PAC加药量预测，返回模型和评估指标"""
+        model, X_train, X_val, X_test, y_train, y_val, y_test = self._train_booster(
+            df, feature_cols, "pac_dosage", "task1",
+            "model1_pac_dosage.txt", "model1_features.json",
+            output_dir, "训练任务1: PAC加药量预测",
         )
 
         # 评估
@@ -865,75 +870,20 @@ class ModelTrainer:
                 "r2": round(metrics["r2"], 4),
                 "mape": round(metrics["mape"], 2),
             }
-            print(
-                f"  [{split_name}] RMSE={metrics['rmse']:.4f} MAE={metrics['mae']:.4f} "
-                f"R²={metrics['r2']:.4f} MAPE={metrics['mape']:.2f}%"
+            logger.info(
+                "  [%s] RMSE=%.4f MAE=%.4f R²=%.4f MAPE=%.2f%%",
+                split_name, metrics["rmse"], metrics["mae"], metrics["r2"], metrics["mape"],
             )
-
-        # 保存
-        model_path = os.path.join(output_dir, "model1_pac_dosage.txt")
-        model.save_model(model_path)
-        with open(
-            os.path.join(output_dir, "model1_features.json"),
-            "w",
-            encoding="utf-8",
-        ) as f:
-            json.dump(feature_cols, f, ensure_ascii=False, indent=2)
-
-        print(f"[模型保存] {model_path}")
         return model, eval_metrics
 
     def train_task2(
         self, df: pd.DataFrame, feature_cols: List[str], output_dir: str = "."
     ) -> tuple[lgb.Booster, dict[str, Any]]:
         """训练任务2：出水TP变化量预测，返回模型和评估指标"""
-        print("\n" + "=" * 60)
-        print("训练任务2: 出水TP变化量预测")
-        print("=" * 60)
-
-        train_df, val_df, test_df = self._time_split(df)
-        X_train, y_train = train_df[feature_cols], train_df["tp_delta"]
-        X_val, y_val = val_df[feature_cols], val_df["tp_delta"]
-        X_test, y_test = test_df[feature_cols], test_df["tp_delta"]
-
-        print(f"训练集: {len(train_df)} | 验证集: {len(val_df)} | 测试集: {len(test_df)}")
-
-        cfg = self.config["task2"]
-        params = {
-            "objective": "regression",
-            "metric": "rmse",
-            "boosting_type": "gbdt",
-            "verbosity": -1,
-            "seed": self.config.get("seed", 42),
-            "num_leaves": cfg["num_leaves"],
-            "max_depth": cfg["max_depth"],
-            "min_data_in_leaf": cfg["min_data_in_leaf"],
-            "min_sum_hessian_in_leaf": cfg["min_sum_hessian_in_leaf"],
-            "learning_rate": cfg["learning_rate"],
-            "feature_fraction": cfg["feature_fraction"],
-            "bagging_fraction": cfg["bagging_fraction"],
-            "bagging_freq": cfg["bagging_freq"],
-            "lambda_l1": cfg["lambda_l1"],
-            "lambda_l2": cfg["lambda_l2"],
-            "max_bin": 255,
-            "num_threads": 4,
-        }
-
-        train_data = lgb.Dataset(X_train, label=y_train)
-        val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
-
-        model = lgb.train(
-            params,
-            train_data,
-            num_boost_round=cfg["num_boost_round"],
-            valid_sets=[train_data, val_data],
-            valid_names=["train", "valid"],
-            callbacks=[
-                lgb.early_stopping(
-                    stopping_rounds=cfg["early_stopping_rounds"], verbose=False
-                ),
-                lgb.log_evaluation(period=0),
-            ],
+        model, X_train, X_val, X_test, y_train, y_val, y_test = self._train_booster(
+            df, feature_cols, "tp_delta", "task2",
+            "model2_tp_delta.txt", "model2_features.json",
+            output_dir, "训练任务2: 出水TP变化量预测",
         )
 
         # 评估（delta + 绝对值）
@@ -966,26 +916,14 @@ class ModelTrainer:
                     "mape": round(metrics_abs["mape"], 2),
                 },
             }
-            print(
-                f"  [{split_name}(delta)] RMSE={metrics_delta['rmse']:.4f} "
-                f"MAE={metrics_delta['mae']:.4f} R²={metrics_delta['r2']:.4f}"
+            logger.info(
+                "  [%s(delta)] RMSE=%.4f MAE=%.4f R²=%.4f",
+                split_name, metrics_delta["rmse"], metrics_delta["mae"], metrics_delta["r2"],
             )
-            print(
-                f"  [{split_name}(绝对TP)] RMSE={metrics_abs['rmse']:.4f} "
-                f"MAE={metrics_abs['mae']:.4f} MAPE={metrics_abs['mape']:.2f}%"
+            logger.info(
+                "  [%s(绝对TP)] RMSE=%.4f MAE=%.4f MAPE=%.2f%%",
+                split_name, metrics_abs["rmse"], metrics_abs["mae"], metrics_abs["mape"],
             )
-
-        # 保存
-        model_path = os.path.join(output_dir, "model2_tp_delta.txt")
-        model.save_model(model_path)
-        with open(
-            os.path.join(output_dir, "model2_features.json"),
-            "w",
-            encoding="utf-8",
-        ) as f:
-            json.dump(feature_cols, f, ensure_ascii=False, indent=2)
-
-        print(f"[模型保存] {model_path}")
         return model, eval_metrics
 
     def train_both(
@@ -1038,8 +976,9 @@ class InferencePipeline:
 
         self.history: deque = deque(maxlen=buffer_size)
         self.sample_interval_minutes = sample_interval_minutes
-        print(
-            f"[推理初始化] 模型1特征: {len(self.features1)}个, 模型2特征: {len(self.features2)}个"
+        logger.info(
+            "[推理初始化] 模型1特征: %d个, 模型2特征: %d个",
+            len(self.features1), len(self.features2),
         )
 
     def _validate(self, data):
@@ -1059,144 +998,38 @@ class InferencePipeline:
         self.history.clear()
         for _, row in data.iterrows():
             self.history.append(row.to_dict())
-        print(f"[历史加载] 已加载 {len(self.history)} 条记录")
+        logger.info("[历史加载] 已加载 %d 条记录", len(self.history))
 
     def update(self, new_data):
         data = self._validate(new_data)
         self.history.append(data.iloc[0].to_dict())
 
     def _compute_features(self) -> pd.DataFrame:
+        # P1-7 修复：推理时复用 FeatureEngineer 的静态方法，避免训练-推理特征计算逻辑重复。
+        # 原实现独立重写了时间/交互/lag/滑动窗口/差分/PAC有效剂量特征的计算，
+        # 与训练侧 FeatureEngineer.build_features 存在细微差异（如 PAC 有效剂量冷启动值不同），
+        # 会导致训练-推理特征不一致。此处直接调用 FeatureEngineer 静态方法保证一致性。
         if len(self.history) < 36:
             raise ValueError(f"历史数据不足: {len(self.history)}条，需要至少36条")
 
         df = pd.DataFrame(list(self.history))
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df = df.sort_values("timestamp").reset_index(drop=True)
-        current = df.iloc[-1:].copy()
 
-        # 时间特征
-        ts = current["timestamp"].iloc[0]
-        hour = ts.hour
-        dayofweek = ts.dayofweek
-        current["hour_sin"] = np.sin(2 * np.pi * hour / 24)
-        current["hour_cos"] = np.cos(2 * np.pi * hour / 24)
-        current["dayofweek"] = dayofweek
-        current["is_weekend"] = 1 if dayofweek >= 5 else 0
+        # 与 FeatureEngineer.build_features 保持相同的调用顺序
+        df = FeatureEngineer._add_time_features(df)
+        df = FeatureEngineer._add_interaction_features(df)
+        df = FeatureEngineer._add_lag_features(df)
+        df = FeatureEngineer._add_rolling_features(df)
+        df = FeatureEngineer._add_diff_features(df)
+        df = FeatureEngineer._add_pac_effective_features(df, self.sample_interval_minutes)
 
-        # 交互特征
-        current["tp_load"] = (
-            current["inflow_flow"].iloc[0] * current["inflow_tp"].iloc[0]
-        )
-        current["orp_east_avg"] = (
-            current["orp_east_1"].iloc[0] + current["orp_east_2"].iloc[0]
-        ) / 2
-        current["orp_west_avg"] = (
-            current["orp_west_1"].iloc[0] + current["orp_west_2"].iloc[0]
-        ) / 2
-        current["orp_total_avg"] = (
-            current["orp_east_avg"].iloc[0] + current["orp_west_avg"].iloc[0]
-        ) / 2
-        current["orp_east_diff"] = (
-            current["orp_east_1"].iloc[0] - current["orp_east_2"].iloc[0]
-        )
-        current["orp_west_diff"] = (
-            current["orp_west_1"].iloc[0] - current["orp_west_2"].iloc[0]
-        )
-        current["mlss_avg"] = (
-            current["mlss_east"].iloc[0] + current["mlss_west"].iloc[0]
-        ) / 2
-        current["mlss_diff"] = (
-            current["mlss_east"].iloc[0] - current["mlss_west"].iloc[0]
-        )
-        current["return_total"] = (
-            current["high_density_a1_return"].iloc[0]
-            + current["high_density_a2_return"].iloc[0]
-        )
+        # 任务1特有特征（与 build_features 中一致）
+        df["outflow_tp_lag1_above_target"] = (df["outflow_tp_lag1"] > 0.3).astype(int)
+        df["outflow_tp_lag1_deviation"] = df["outflow_tp_lag1"] - 0.3
 
-        # 辅助历史列
-        df["tp_load_hist"] = df["inflow_flow"] * df["inflow_tp"]
-        df["orp_east_avg_hist"] = (df["orp_east_1"] + df["orp_east_2"]) / 2
-        df["orp_west_avg_hist"] = (df["orp_west_1"] + df["orp_west_2"]) / 2
-        df["orp_total_avg_hist"] = (
-            df["orp_east_avg_hist"] + df["orp_west_avg_hist"]
-        ) / 2
-        df["mlss_avg_hist"] = (df["mlss_east"] + df["mlss_west"]) / 2
-
-        def get_lag(col, lag):
-            idx = len(df) - 1 - lag
-            return df.iloc[idx][col] if idx >= 0 else np.nan
-
-        lag_map = {
-            "inflow_flow": "inflow_flow",
-            "inflow_tp": "inflow_tp",
-            "inflow_ph": "inflow_ph",
-            "outflow_tp": "outflow_tp",
-            "orp_total_avg": "orp_total_avg_hist",
-            "mlss_avg": "mlss_avg_hist",
-            "tp_load": "tp_load_hist",
-            "pac_dosage": "pac_dosage",
-        }
-        for col in lag_map:
-            for lag in [1, 2, 3, 6, 12, 18, 24]:
-                current[f"{col}_lag{lag}"] = get_lag(lag_map[col], lag)
-
-        current["outflow_tp_lag1_above_target"] = (
-            1 if get_lag("outflow_tp", 1) > 0.3 else 0
-        )
-        current["outflow_tp_lag1_deviation"] = get_lag("outflow_tp", 1) - 0.3
-
-        # 有效PAC剂量特征（指数衰减加权平均）
-        pac_values = df["pac_dosage"].values
-        taus = [60, 120, 180, 240]
-        for tau in taus:
-            alpha = 1.0 - np.exp(-self.sample_interval_minutes / tau)
-            ewma = 0.0
-            for i in range(len(pac_values)):
-                ewma = alpha * pac_values[i] + (1 - alpha) * ewma
-            current[f"pac_effective_tau{tau}"] = ewma
-
-        # 滑动窗口
-        def roll_stats(col, w):
-            if len(df) < w + 1:
-                return np.nan, np.nan, np.nan, np.nan
-            hist = df[col].iloc[-(w + 1) : -1]
-            return hist.mean(), hist.std(), hist.max(), hist.min()
-
-        roll_map = {
-            "inflow_flow": "inflow_flow",
-            "inflow_tp": "inflow_tp",
-            "outflow_tp": "outflow_tp",
-            "orp_total_avg": "orp_total_avg_hist",
-            "mlss_avg": "mlss_avg_hist",
-            "pac_dosage": "pac_dosage",
-        }
-        for col, hcol in roll_map.items():
-            for w in [3, 6, 12, 36, 72]:
-                m, s, mx, mn = roll_stats(hcol, w)
-                current[f"{col}_rollmean_{w}"] = m
-                current[f"{col}_rollstd_{w}"] = s
-                current[f"{col}_rollmax_{w}"] = mx
-                current[f"{col}_rollmin_{w}"] = mn
-
-        # 差分
-        def get_diff(col, p):
-            i_now, i_then = len(df) - 1, len(df) - 1 - p
-            return df.iloc[i_now][col] - df.iloc[i_then][col] if i_then >= 0 else np.nan
-
-        diff_map = {
-            "inflow_flow": "inflow_flow",
-            "inflow_tp": "inflow_tp",
-            "outflow_tp": "outflow_tp",
-            "tp_load_hist": "tp_load_hist",
-            "orp_total_avg_hist": "orp_total_avg_hist",
-            "pac_dosage": "pac_dosage",
-        }
-        for col, actual in diff_map.items():
-            for p in [1, 3, 6, 12]:
-                clean_name = actual.replace("_hist", "").replace("_total_avg", "_total_avg")
-                current[f"{clean_name}_diff{p}"] = get_diff(actual, p)
-
-        return current
+        # 只返回最后一行（当前时刻）的特征
+        return df.iloc[[-1]].copy()
 
     def predict(self) -> Dict[str, Any]:
         if len(self.history) < 36:

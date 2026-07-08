@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# P2-5 修复：原 PlcConnectResult/ModbusConnectResult 和 PlcReadResult/ModbusReadResult 结构几乎一致，
+# 统一为 ConnectResult/ReadResult。旧名称保留为别名以兼容已有导入（如测试）。
 @dataclass
-class PlcConnectResult:
+class ConnectResult:
     ok: bool
     status: str
     message: str
@@ -16,7 +18,7 @@ class PlcConnectResult:
 
 
 @dataclass
-class PlcReadResult:
+class ReadResult:
     value: bool | int | float
     value_text: str
     numeric_value: float
@@ -25,22 +27,11 @@ class PlcReadResult:
     byte_length: int
 
 
-@dataclass
-class ModbusConnectResult:
-    ok: bool
-    status: str
-    message: str
-    client: Any | None = None
-
-
-@dataclass
-class ModbusReadResult:
-    value: bool | int | float
-    value_text: str
-    numeric_value: float
-    address: str
-    data_type: str
-    byte_length: int
+# 兼容别名：旧代码（含测试）按协议导入不同名称，此处保持向后兼容
+PlcConnectResult = ConnectResult
+ModbusConnectResult = ConnectResult
+PlcReadResult = ReadResult
+ModbusReadResult = ReadResult
 
 
 def connect_s7_1500(

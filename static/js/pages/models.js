@@ -849,10 +849,4 @@ async function trainModelProject(modelId) {
   } catch (err) { showToast(`训练失败：${err.message}`); }
 }
 
-async function deployModelProject(model) {
-  try {
-    await api(`/api/models/${model.id}/deploy`, { method: "POST", body: JSON.stringify({ enabled: model.status !== "published", actor: "local" }) });
-    showToast(model.status === "published" ? "模型已停止投用" : `模型已投用：${modelKindLabel(model)}`);
-    await refreshAll();
-  } catch (err) { showToast(`投用失败：${err.message}`); }
-}
+// P2-16 修复：deployModelProject 为死代码——定义后无任何按钮绑定。已删除。

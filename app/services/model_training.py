@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from app.api.common import row_to_dict
 from app.database import db_session, dumps_json, loads_json, utc_now_iso
 from app.schemas import ModelSampleImportIn
+from app.services import feature_schema
 from app.services import wwtp_ai_engine
 
 
@@ -27,11 +28,17 @@ MODEL_SAMPLE_TIME_FORMATS = (
     "%Y-%m-%d",
 )
 
-MODEL_KIND_TP_OUT_RESPONSE = "tp_out_response"
-MODEL_KIND_PAC_FLOW_PREDICT = "pac_flow_predict"
+# DEPRECATED: 以下 MODEL_KIND_TP_OUT_RESPONSE / MODEL_KIND_PAC_FLOW_PREDICT 两种旧模型类型
+# 已被 MODEL_KIND_AI_PAC_DUAL_TASK 取代（SUPPORTED_MODEL_KINDS 仅含双任务模型）。
+# 相关的 MODEL_INPUT_FEATURES、target_definition_for_kind、train_regression_artifact 等分支
+# 均为旧模型死代码，仅保留以兼容历史数据库中的 model_projects 记录，不再支持新建或训练。
+# P1-5: 标记为 deprecated，不删除。如需彻底移除请确认数据库中无旧类型模型记录。
+MODEL_KIND_TP_OUT_RESPONSE = "tp_out_response"  # DEPRECATED
+MODEL_KIND_PAC_FLOW_PREDICT = "pac_flow_predict"  # DEPRECATED
 MODEL_KIND_AI_PAC_DUAL_TASK = "ai_pac_dual_task"
 SUPPORTED_MODEL_KINDS = {MODEL_KIND_AI_PAC_DUAL_TASK}
-TP_FORECAST_LEGACY_TARGET_ALIASES = (
+# DEPRECATED: 以下两个别名元组仅用于旧模型 CSV 导入的标签列识别，双任务模型不需要。
+TP_FORECAST_LEGACY_TARGET_ALIASES = (  # DEPRECATED
     "下一次出水TP检测数据",
     "下一次出水TP",
     "下次出水TP",
@@ -45,14 +52,17 @@ TP_FORECAST_LEGACY_TARGET_ALIASES = (
     "target_tp_out_60",
     "_training_target_tp_out_60",
 )
-PAC_FLOW_TARGET_ALIASES = (
+PAC_FLOW_TARGET_ALIASES = (  # DEPRECATED
     "实际加药流量",
     "加药流量",
     "PAC_ACTUAL",
     "target_pac_actual",
     "_training_target_pac_actual",
 )
-MODEL_INPUT_FEATURES = [
+# DEPRECATED: 旧模型输入特征列表，仅用于 tp_out_response / pac_flow_predict 两种已废弃类型。
+# 与 DUAL_TASK_INPUT_FEATURES 不同，此处用 tag_type 作为 key 且不含 PAC_ACTUAL。
+# 双任务模型使用 DUAL_TASK_INPUT_FEATURES（从 feature_schema 派生）。
+MODEL_INPUT_FEATURES = [  # DEPRECATED
     ("Q", None, "参考流量", "m3/h"),
     ("TP_BEFORE", "in_tp_tag_id", "进水TP", "mg/L"),
     ("PH", "in_ph_tag_id", "进水PH", ""),
@@ -85,6 +95,8 @@ def model_kind(model) -> str:
 def default_training_config(kind: str, schema: list[dict[str, Any]]) -> dict[str, Any]:
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
         return wwtp_ai_engine.DEFAULT_TRAIN_CONFIG.copy()
+    # DEPRECATED: 以下分支仅服务于旧模型类型（tp_out_response / pac_flow_predict），
+    # 因 SUPPORTED_MODEL_KINDS 检查上游会拦截，正常流程不会执行到此处。
     _target_name, target_key, _target_label = target_definition_for_kind(kind)
     feature_columns = [str(item["key"]) for item in schema]
     return {
@@ -149,6 +161,8 @@ def normalize_training_config(raw: Any, kind: str, schema: list[dict[str, Any]])
         raise HTTPException(422, "模型类型不支持")
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
         return wwtp_ai_engine.normalize_training_config(raw)
+    # DEPRECATED: 以下分支仅服务于旧模型类型，上游 SUPPORTED_MODEL_KINDS 检查会拦截，
+    # 正常流程不会执行到此处。保留是为了兼容历史代码路径。
     base = default_training_config(kind, schema)
     raw = raw if isinstance(raw, dict) else {}
     schema_keys = [str(item["key"]) for item in schema]
@@ -267,21 +281,9 @@ def model_sample_value(value: Any, digits: int = 6) -> float | None:
     return round(number, digits)
 
 
-DUAL_TASK_INPUT_FEATURES = [
-    ("inflow_flow", "in_flow_tag_id", "生化池A进水流量过程值", "m3/h"),
-    ("inflow_tp", "in_tp_tag_id", "进水总磷过程值", "mg/L"),
-    ("inflow_ph", "in_ph_tag_id", "进水在线PH过程值", ""),
-    ("outflow_tp", "out_tp_tag_id", "出水总磷过程值", "mg/L"),
-    ("high_density_a1_return", "reflux_flow_1_tag_id", "高密A1回流流量过程值", "m3/h"),
-    ("high_density_a2_return", "reflux_flow_2_tag_id", "高密A2回流流量过程值", "m3/h"),
-    ("orp_east_1", "bio_orp1_tag_id", "生化池A东ORP1过程值", "mV"),
-    ("orp_east_2", "bio_orp2_tag_id", "生化池A东ORP2过程值", "mV"),
-    ("orp_west_1", "bio_orp3_tag_id", "生化池A西ORP1过程值", "mV"),
-    ("orp_west_2", "bio_orp4_tag_id", "生化池A西ORP2过程值", "mV"),
-    ("mlss_east", "bio_mlss1_tag_id", "生化池A东MLSS过程值", "mg/L"),
-    ("mlss_west", "bio_mlss2_tag_id", "生化池A西MLSS过程值", "mg/L"),
-    ("pac_dosage", "pac_flow_tag_id", "PAC1加药流量过程值", "L/h"),
-]
+# P1-6 修复：原此处硬编码 13 个过程变量映射，与 recommendation.PROCESS_SOURCE_MAP、
+# wwtp_ai_engine.RAW_COLS 三处重复。现统一从 feature_schema 单一数据源派生。
+DUAL_TASK_INPUT_FEATURES = feature_schema.dual_task_input_features()
 
 
 def default_model_feature_schema(kind: str | None = None) -> list[dict[str, Any]]:
@@ -300,6 +302,7 @@ def default_model_feature_schema(kind: str | None = None) -> list[dict[str, Any]
             }
             for key, field_name, label, default_unit in DUAL_TASK_INPUT_FEATURES
         ]
+    # DEPRECATED: 以下分支仅服务于旧模型类型，上游 SUPPORTED_MODEL_KINDS 检查会拦截。
     return [
         {
             "key": key,
@@ -324,10 +327,11 @@ def current_model_feature_schema(con, dosing_point_id: int | None = None, kind: 
         raise HTTPException(422, "模型类型不支持")
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
         return model_input_feature_schema_dual(con, point)
+    # DEPRECATED: 以下调用仅服务于旧模型类型，上游 SUPPORTED_MODEL_KINDS 检查会拦截。
     return model_input_feature_schema(con, point)
 
 
-def model_input_feature_schema(con, point) -> list[dict[str, Any]]:
+def model_input_feature_schema(con, point) -> list[dict[str, Any]]:  # DEPRECATED
     schema: list[dict[str, Any]] = []
     for key, field_name, label, default_unit in MODEL_INPUT_FEATURES:
         tag_id = point[field_name] if field_name else None
@@ -446,14 +450,17 @@ def parse_model_csv_sample_time(value: Any, row_number: int) -> str:
 def target_definition_for_kind(kind: str) -> tuple[str, str, str]:
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
         return ("DUAL_TASK", "_dual_task", "智能PAC双任务")
+    # DEPRECATED: 以下分支仅服务于旧模型类型，且引用了未定义的 PAC_FLOW_TARGET / TP_FORECAST_TARGET，
+    # 实际不可执行（上游 SUPPORTED_MODEL_KINDS 检查会拦截）。保留仅为代码结构完整性。
     if kind == MODEL_KIND_PAC_FLOW_PREDICT:
-        return PAC_FLOW_TARGET
-    return TP_FORECAST_TARGET
+        return PAC_FLOW_TARGET  # DEPRECATED: NameError if reached — PAC_FLOW_TARGET 未定义
+    return TP_FORECAST_TARGET  # DEPRECATED: NameError if reached — TP_FORECAST_TARGET 未定义
 
 
 def target_aliases_for_kind(kind: str) -> tuple[str, ...]:
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
         return ()
+    # DEPRECATED: 以下分支仅服务于旧模型类型 CSV 导入。
     if kind == MODEL_KIND_PAC_FLOW_PREDICT:
         return PAC_FLOW_TARGET_ALIASES
     return TP_FORECAST_LEGACY_TARGET_ALIASES
@@ -462,6 +469,7 @@ def target_aliases_for_kind(kind: str) -> tuple[str, ...]:
 def model_artifact_format(kind: str) -> str:
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
         return "ai_pac_dual_task_v2"
+    # DEPRECATED: 以下分支仅服务于旧模型类型。
     if kind == MODEL_KIND_PAC_FLOW_PREDICT:
         return "ai_pac_flow_predict_v1"
     return "ai_pac_tp_forecast_v3"
@@ -490,6 +498,7 @@ def import_model_csv_samples(con, model, csv_text: str) -> dict[str, int]:
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
         return _import_dual_task_csv_samples(con, model, csv_text)
 
+    # DEPRECATED: 以下分支仅服务于旧模型类型 CSV 导入，上游 SUPPORTED_MODEL_KINDS 检查会拦截。
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff\r\n\t ")))
     if not reader.fieldnames:
         raise HTTPException(422, "CSV 缺少表头")
@@ -549,12 +558,14 @@ def train_model_project_artifact(con, model) -> dict[str, Any]:
     kind = model_kind(model)
     if kind == MODEL_KIND_AI_PAC_DUAL_TASK:
         return train_dual_task_artifact(con, model)
+    # DEPRECATED: 以下分支仅服务于旧模型类型，因 SUPPORTED_MODEL_KINDS 仅含双任务模型，
+    # 此处的 kind in SUPPORTED_MODEL_KINDS 检查永远为 False，属于死代码。
     if kind in SUPPORTED_MODEL_KINDS:
         return train_regression_artifact(con, model, kind)
     raise HTTPException(422, "模型类型不支持")
 
 
-def train_regression_artifact(con, model, kind: str) -> dict[str, Any]:
+def train_regression_artifact(con, model, kind: str) -> dict[str, Any]:  # DEPRECATED
     target_name, target_key, label = target_definition_for_kind(kind)
     trained = build_regression_booster(con, model, target_key)
     artifact = {
@@ -594,7 +605,7 @@ def train_regression_artifact(con, model, kind: str) -> dict[str, Any]:
     return {"artifact": artifact, "metrics": metrics}
 
 
-def build_regression_booster(con, model, target_key: str) -> dict[str, Any]:
+def build_regression_booster(con, model, target_key: str) -> dict[str, Any]:  # DEPRECATED
     target_column = training_target_column(con)
     samples = [
         row_to_dict(row)

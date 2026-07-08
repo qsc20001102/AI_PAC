@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from app.api.common import row_to_dict
-from app.database import utc_now_iso
+from app.database import utc_now, utc_now_iso
 from app.schemas import IngestSampleIn
 
 
@@ -23,7 +23,7 @@ def data_quality_rows(con) -> list[dict[str, Any]]:
         ORDER BY CASE WHEN st.dosing_point_id IS NULL THEN 0 ELSE 1 END, dp.display_order, st.id
         """
     ).fetchall()
-    now = datetime.now()
+    now = utc_now()  # P1-1: 统一 UTC
     result = []
     for row in rows:
         item = row_to_dict(row)
@@ -60,8 +60,18 @@ def write_ingested_samples(con, samples: list[IngestSampleIn]) -> tuple[int, set
     affected: set[int] = set()
     errors: list[str] = []
     now_iso = utc_now_iso()
+    # P1-3 优化：原代码每个 sample 单独查 sensor_tags（N+1）。改为一次性批量预加载 tag_code 映射。
+    tag_codes = {item.tag_code for item in samples}
+    tag_map: dict[str, Any] = {}
+    if tag_codes:
+        placeholders = ",".join("?" for _ in tag_codes)
+        for row in con.execute(
+            f"SELECT * FROM sensor_tags WHERE tag_code IN ({placeholders})",
+            tuple(tag_codes),
+        ).fetchall():
+            tag_map[row["tag_code"]] = row
     for item in samples:
-        tag = con.execute("SELECT * FROM sensor_tags WHERE tag_code=?", (item.tag_code,)).fetchone()
+        tag = tag_map.get(item.tag_code)
         if not tag:
             errors.append(f"{item.tag_code}: 标签不存在")
             continue
@@ -82,7 +92,7 @@ def write_ingested_samples(con, samples: list[IngestSampleIn]) -> tuple[int, set
 
 def refresh_local_simulated_samples(con, force: bool = False) -> None:
     """Write one batch of local simulated samples for manual collector testing."""
-    now = datetime.now().replace(second=0, microsecond=0)
+    now = utc_now().replace(second=0, microsecond=0)  # P1-1: 统一 UTC
     baselines = {
         1: {"Q": 1235.0, "PO4_P": 0.320, "TP_BEFORE": 0.460, "TP_OUT": 0.180, "PH": 7.32, "PAC_ACTUAL": 36.4, "TURBIDITY": 14.0},
         2: {"Q": 988.0, "PO4_P": 0.410, "TP_BEFORE": 0.530, "TP_OUT": 0.240, "PH": 7.28, "PAC_ACTUAL": 28.3, "TURBIDITY": 18.0},

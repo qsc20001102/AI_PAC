@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -10,25 +11,18 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from app.database import DEFAULT_UNIT_DOSE_CURVE, clear_alarm, dumps_json, loads_json, parse_dt, upsert_alarm, utc_now_iso
+from app.database import DEFAULT_UNIT_DOSE_CURVE, clear_alarm, dumps_json, loads_json, parse_dt, upsert_alarm, utc_now, utc_now_iso
+from app.services import feature_schema
 from app.services import wwtp_ai_engine
 
+logger = logging.getLogger(__name__)
 
-PROCESS_SOURCE_MAP = [
-    ("in_flow_tag_id", "IN_Q", "进水流量", "m3/h"),
-    ("in_tp_tag_id", "TP_BEFORE", "进水TP", "mg/L"),
-    ("in_ph_tag_id", "PH", "进水PH", ""),
-    ("out_tp_tag_id", "TP_OUT", "出水TP", "mg/L"),
-    ("reflux_flow_1_tag_id", "REFLUX_Q1", "回流流量1", "m3/h"),
-    ("reflux_flow_2_tag_id", "REFLUX_Q2", "回流流量2", "m3/h"),
-    ("pac_flow_tag_id", "PAC_ACTUAL", "加药流量", "L/h"),
-    ("bio_orp1_tag_id", "BIO_ORP1", "生化池ORP1", "mV"),
-    ("bio_orp2_tag_id", "BIO_ORP2", "生化池ORP2", "mV"),
-    ("bio_orp3_tag_id", "BIO_ORP3", "生化池ORP3", "mV"),
-    ("bio_orp4_tag_id", "BIO_ORP4", "生化池ORP4", "mV"),
-    ("bio_mlss1_tag_id", "BIO_MLSS1", "生化池MLSS1", "mg/L"),
-    ("bio_mlss2_tag_id", "BIO_MLSS2", "生化池MLSS2", "mg/L"),
-]
+
+# P1-6 修复：原此处硬编码 13 个过程变量映射，与 model_training.MODEL_INPUT_FEATURES、
+# wwtp_ai_engine.RAW_COLS 三处重复。现统一从 feature_schema 单一数据源派生。
+# 注意：顺序由 feature_schema.PROCESS_VARIABLES 决定（pac_flow_tag_id 排在最后），
+# 与原定义不同，但 recommendation/trends 均按 logical_type 键访问，不依赖顺序。
+PROCESS_SOURCE_MAP = feature_schema.process_source_map()
 
 
 @dataclass
@@ -58,7 +52,7 @@ def valid_for_calc(point: DataPoint | None) -> bool:
 
 
 def classify_sample(tag: sqlite3.Row, sample: sqlite3.Row | dict[str, Any] | None, now: datetime | None = None) -> DataPoint:
-    now = now or datetime.now().replace(microsecond=0)
+    now = now or utc_now().replace(microsecond=0)  # P1-1: 统一 UTC
     if sample is None:
         return DataPoint(tag["id"], tag["tag_code"], tag["tag_type"], tag["tag_code"], tag["unit"], None, None, None, "missing", tag["source"], "missing", None, tag["stale_minutes"], tag["max_stale_minutes"])
 
@@ -177,14 +171,61 @@ def latest_data_for_point(con: sqlite3.Connection, dosing_point_id: int, now: da
     point = con.execute("SELECT * FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
     if not point:
         return {}
-    result: dict[str, DataPoint] = {}
+    # P1-3 优化：原代码对 PROCESS_SOURCE_MAP 每个字段单独查询 sensor_tags 与 sensor_samples（N+1）。
+    # 改为一次性批量查询所有标签及其最新历史样本，行为与 latest_data_for_tag 保持一致。
+    specs: list[tuple[int, str, str, str]] = []
     for field, logical_type, logical_name, default_unit in PROCESS_SOURCE_MAP:
         tag_id = point[field]
-        if tag_id is None:
+        if tag_id is not None:
+            specs.append((int(tag_id), logical_type, logical_name, default_unit))
+    result: dict[str, DataPoint] = {}
+    if not specs:
+        apply_flow_policy(point, result)
+        return result
+    tag_ids = [spec[0] for spec in specs]
+    placeholders = ",".join("?" for _ in tag_ids)
+    tag_rows: dict[int, sqlite3.Row] = {
+        int(row["id"]): row
+        for row in con.execute(
+            f"SELECT * FROM sensor_tags WHERE id IN ({placeholders}) AND enabled=1",
+            tuple(tag_ids),
+        ).fetchall()
+    }
+    # 批量取每个 tag 的最新历史样本（sample_time <= now），等价于 ORDER BY sample_time DESC LIMIT 1
+    now_iso = now.isoformat() if now else None
+    history_rows: dict[int, sqlite3.Row] = {}
+    if now_iso is not None:
+        for row in con.execute(
+            f"""
+            SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY tag_id ORDER BY sample_time DESC) AS _rn
+                FROM sensor_samples
+                WHERE tag_id IN ({placeholders}) AND sample_time <= ?
+            ) WHERE _rn = 1
+            """,
+            (*tag_ids, now_iso),
+        ).fetchall():
+            history_rows[int(row["tag_id"])] = row
+    for tag_id, logical_type, logical_name, default_unit in specs:
+        tag = tag_rows.get(tag_id)
+        if not tag:
             continue
-        data = latest_data_for_tag(con, int(tag_id), logical_type, logical_name, default_unit, now)
-        if data:
-            result[logical_type] = data
+        realtime_sample: dict[str, Any] | None = None
+        if now_iso is None and tag["last_value_text"] is not None and tag["last_read_at"] is not None:
+            try:
+                realtime_sample = {
+                    "value": float(tag["last_value_text"]),
+                    "sample_time": tag["last_read_at"],
+                    "receive_time": tag["last_read_at"],
+                    "quality": tag["last_quality"] or "unknown",
+                    "source": tag["source"],
+                }
+            except (TypeError, ValueError):
+                realtime_sample = None
+        sample = realtime_sample or history_rows.get(tag_id)
+        result[logical_type] = with_logical_type(
+            classify_sample(tag, sample, now), logical_type, logical_name, default_unit
+        )
     apply_flow_policy(point, result)
     return result
 
@@ -392,8 +433,8 @@ def predict_dual_task_model(
         }
         return pac_pred, next_tp_pred, detail, None
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        # P1-2: 使用 logging 替代 traceback.print_exc()
+        logger.error("双任务模型推理异常", exc_info=True)
         return None, None, None, f"双任务模型推理异常: {exc}"
 
 
@@ -512,8 +553,8 @@ def optimize_pac_for_target_tp_dual(
         return best_pac, best_tp, detail, None
 
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        # P1-2: 使用 logging 替代 traceback.print_exc()
+        logger.error("双任务模型优化计算异常", exc_info=True)
         return None, None, None, f"优化计算异常: {exc}"
 
 
@@ -533,6 +574,9 @@ def model_feature_row(artifact: dict[str, Any], data: dict[str, DataPoint], extr
 
 
 def predict_legacy_tp_forecast_model(model: sqlite3.Row, data: dict[str, DataPoint], extra: dict[str, float] | None = None) -> tuple[float | None, dict[str, Any] | None, str | None]:
+    # DEPRECATED (P1-5): 此函数仅用于处理 ai_pac_tp_forecast_v1 格式的旧模型工件，
+    # 作为 tp_forecast 推理的兜底分支。新训练的模型均使用 v3 格式（predict_tp_forecast_model）。
+    # 保留是为了兼容历史数据库中可能存在的旧格式模型记录。
     artifact = loads_json(model["artifact_json"], {})
     if artifact.get("format") != "ai_pac_tp_forecast_v1":
         return None, None, "模型文件格式已过期，请重新训练"
@@ -645,7 +689,7 @@ def calculate_for_point(
     source: str = "online",
     ai_enabled: bool = True,
 ) -> dict[str, Any]:
-    now = now or datetime.now().replace(second=0, microsecond=0)
+    now = now or utc_now().replace(second=0, microsecond=0)  # P1-1: 统一 UTC
     point = con.execute(
         """
         SELECT dp.*, pl.name AS process_line_name
@@ -744,6 +788,9 @@ def optimize_pac_by_tp_forecast_model(
     data: dict[str, DataPoint],
     control: sqlite3.Row,
 ) -> tuple[float | None, dict[str, Any] | None, str | None]:
+    # DEPRECATED: 此函数为旧 tp_out_response 模型的枚举搜索逻辑，当前推理路径已切换到
+    # 双任务模型（predict_dual_task_model）与 v3 预测（predict_tp_forecast_model），
+    # 全仓搜索无任何调用方。按 P1-5 要求保留但标记为废弃，不直接删除。
     target_tp = float(control["tp_target_mg_l"])
     min_l_h = float(control["pac_min_l_h"])
     max_l_h = float(control["pac_max_l_h"])
@@ -1002,7 +1049,7 @@ def _pack_cached_recommendation(con: sqlite3.Connection, point_id: int, now: dat
 
 
 def recalculate_all(con: sqlite3.Connection) -> list[dict[str, Any]]:
-    now = datetime.now().replace(second=0, microsecond=0)
+    now = utc_now().replace(second=0, microsecond=0)  # P1-1: 统一 UTC
     rows = con.execute(
         "SELECT id FROM dosing_points WHERE enabled=1 AND process_parameter_group_id IS NOT NULL ORDER BY display_order"
     ).fetchall()

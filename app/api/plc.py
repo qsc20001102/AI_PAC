@@ -53,16 +53,23 @@ def plc_status() -> dict[str, Any]:
     }
 
 
+def _resolve_plc_defaults(payload: PlcDeviceCreate | PlcDeviceUpdate) -> tuple[int, int, str, int]:
+    """P2-4 修复：create_plc_device 与 update_plc_device 中 rack/slot/byte_order/unit_id 默认值计算完全重复，抽取公共函数。"""
+    rack = payload.rack if payload.rack is not None else 0
+    slot = payload.slot if payload.slot is not None else 0
+    # 所有协议都保存 unit_id 和 byte_order（S7-1500 使用默认值即可，不能传 None 因为 NOT NULL）
+    byte_order_value = payload.byte_order if payload.byte_order is not None else "ABCD"
+    unit_id_value = payload.unit_id if payload.unit_id is not None else 1
+    return rack, slot, byte_order_value, unit_id_value
+
+
 @router.post("/api/plc/devices")
 def create_plc_device(payload: PlcDeviceCreate) -> dict[str, Any]:
     validate_plc_device_payload(payload)
     now = utc_now_iso()
     with db_session() as con:
-        # 根据协议保存不同的参数
-        rack_slot = payload.rack if payload.rack is not None else 0, payload.slot if payload.slot is not None else 0
-        # 所有协议都保存 unit_id 和 byte_order（S7-1500 使用默认值即可，不能传 None 因为 NOT NULL）
-        byte_order_value = payload.byte_order if payload.byte_order is not None else "ABCD"
-        unit_id_value = payload.unit_id if payload.unit_id is not None else 1
+        # P2-4 修复：rack/slot/byte_order/unit_id 默认值计算抽取到 _resolve_plc_defaults。
+        rack, slot, byte_order_value, unit_id_value = _resolve_plc_defaults(payload)
 
         cur = con.execute(
             """
@@ -79,8 +86,8 @@ def create_plc_device(payload: PlcDeviceCreate) -> dict[str, Any]:
                 payload.ip_address.strip(),
                 payload.port,
                 payload.timeout_ms,
-                rack_slot[0],
-                rack_slot[1],
+                rack,
+                slot,
                 unit_id_value,
                 byte_order_value,
                 None,
@@ -114,11 +121,8 @@ def update_plc_device(device_id: int, payload: PlcDeviceUpdate) -> dict[str, Any
             disconnect_plc_client(active_client, device_id)
             log_plc_device_event(con, device_id, "disconnect", "disconnected", "Configuration changed; connection closed", device["pdu_length"])
 
-        # 根据协议保存不同的参数
-        rack_slot = payload.rack if payload.rack is not None else 0, payload.slot if payload.slot is not None else 0
-        # 所有协议都保存 unit_id 和 byte_order（S7-1500 使用默认值即可，不能传 None 因为 NOT NULL）
-        byte_order_value = payload.byte_order if payload.byte_order is not None else "ABCD"
-        unit_id_value = payload.unit_id if payload.unit_id is not None else 1
+        # P2-4 修复：rack/slot/byte_order/unit_id 默认值计算抽取到 _resolve_plc_defaults。
+        rack, slot, byte_order_value, unit_id_value = _resolve_plc_defaults(payload)
 
         con.execute(
             """
@@ -135,8 +139,8 @@ def update_plc_device(device_id: int, payload: PlcDeviceUpdate) -> dict[str, Any
                 payload.ip_address.strip(),
                 payload.port,
                 payload.timeout_ms,
-                rack_slot[0],
-                rack_slot[1],
+                rack,
+                slot,
                 unit_id_value,
                 byte_order_value,
                 now,
@@ -198,12 +202,15 @@ def connect_plc_device(device_id: int) -> dict[str, Any]:
                 timeout_ms=int(device["timeout_ms"]),
             )
         else:
+            # P2-13 修复：此 else 永远不会执行——上方第177行已校验 protocol 必为 s7_1500 或 modbus_tcp。
+            # 保留 raise 仅作为防御性编程，避免未来协议扩展时遗漏分支。
             raise HTTPException(422, f"不支持协议：{protocol}")
 
         now = utc_now_iso()
         if result.ok:
             clients[device_id] = result.client
-            pdu_length = getattr(result, "pdu_length", None) if hasattr(result, "pdu_length") else None
+            # P2-14 修复：getattr 已带默认值 None，外层 hasattr 判断冗余，简化为直接 getattr。
+            pdu_length = getattr(result, "pdu_length", None)
             con.execute(
                 """
                 UPDATE plc_devices

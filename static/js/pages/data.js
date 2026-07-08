@@ -391,15 +391,8 @@ function formatAxisTime(timestamp, spanMs) {
 
 function drawHistoryChart(canvas, history) {
   if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.max(700, rect.width * dpr);
-  canvas.height = Math.max(360, rect.height * dpr);
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-  const w = canvas.width / dpr;
-  const h = canvas.height / dpr;
-  ctx.clearRect(0, 0, w, h);
+  // P2-6 修复：Canvas DPR 设置抽取到 setupChartCanvas（data.js 使用 minW=700/minH=360 且不取整）
+  const { ctx, w, h } = setupChartCanvas(canvas, { minW: 700, minH: 360, round: false });
   const pad = { l: 64, r: 24, t: 18, b: 38 };
   const plotW = w - pad.l - pad.r;
   const plotH = h - pad.t - pad.b;
@@ -473,32 +466,9 @@ function drawHistoryChart(canvas, history) {
   });
 }
 
+// P2-6 修复：wireHistoryTooltip 与 overview.js wireChartTooltip 逻辑重复，改为委托共享函数。
 function wireHistoryTooltip(canvas) {
-  const tooltip = document.getElementById("historyTooltip");
-  if (!canvas || !tooltip) return;
-  canvas.addEventListener("mousemove", (event) => {
-    const rect = canvas.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-    let nearest = null;
-    let best = 14;
-    state.historyChartPoints.forEach((point) => {
-      const dist = Math.hypot(point.x - x, point.y - y);
-      if (dist < best) {
-        best = dist;
-        nearest = point;
-      }
-    });
-    if (!nearest) {
-      tooltip.classList.remove("show");
-      return;
-    }
-    tooltip.innerHTML = `<b>${htmlEscape(nearest.tag)}</b><br>${dateMinute(nearest.time)}<br>${fmtCompact(nearest.value, 4)}`;
-    tooltip.style.left = `${Math.min(x + 14, rect.width - 160)}px`;
-    tooltip.style.top = `${Math.max(y - 58, 8)}px`;
-    tooltip.classList.add("show");
-  });
-  canvas.addEventListener("mouseleave", () => tooltip.classList.remove("show"));
+  wireChartTooltip(canvas, "historyTooltip", state.historyChartPoints, (p) => p.tag);
 }
 
 function exportHistoryTableCsv() {

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -30,8 +30,16 @@ DEFAULT_UNIT_DOSE_CURVE = [
 ]
 
 
+def utc_now() -> datetime:
+    # P0-1/P1-1 修复：统一使用 naive UTC 时间。
+    # 采用 naive 而非 aware 是为了与历史数据库中的 naive ISO 字符串保持格式一致，
+    # 避免 aware/naive 混用导致的 TypeError 及 SQL 字符串比较错乱。
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def utc_now_iso() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+    # P0-1 修复：使用 UTC 时间，避免本地时区导致部署到不同时区时时间语义混乱
+    return utc_now().replace(microsecond=0).isoformat()
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -455,10 +463,16 @@ def ensure_runtime_schema(con: sqlite3.Connection) -> None:
     )
     con.execute("UPDATE dosing_points SET phosphorus_source='po4' WHERE phosphorus_source='po4_priority'")
     con.execute("UPDATE dosing_points SET phosphorus_source='in_tp' WHERE phosphorus_source='tp_before'")
-    con.execute("UPDATE dosing_points SET zone_flow_tag_id=NULL WHERE zone_flow_tag_id IS NOT NULL")
-    # `tag_code` is the only collection-point name. Keep the legacy display-name
-    # column synchronized so historical databases cannot surface a second alias.
-    con.execute("UPDATE sensor_tags SET name=tag_code WHERE name<>tag_code")
+    # P3-11 修复：原代码每次启动都无条件执行 UPDATE dosing_points SET zone_flow_tag_id=NULL
+    # 和 UPDATE sensor_tags SET name=tag_code，可能丢失有效数据。
+    # 改为通过 PRAGMA user_version 门控，仅在首次迁移时执行一次。
+    current_version = int(con.execute("PRAGMA user_version").fetchone()[0])
+    if current_version < 1:
+        con.execute("UPDATE dosing_points SET zone_flow_tag_id=NULL WHERE zone_flow_tag_id IS NOT NULL")
+        # `tag_code` is the only collection-point name. Keep the legacy display-name
+        # column synchronized so historical databases cannot surface a second alias.
+        con.execute("UPDATE sensor_tags SET name=tag_code WHERE name<>tag_code")
+        con.execute("PRAGMA user_version = 1")
     ensure_columns(
         con,
         "sensor_tags",
@@ -827,7 +841,27 @@ def infer_process_source_tags(tags: list[sqlite3.Row]) -> dict[str, int | None]:
     }
 
 
+# P3-12 修复：ensure_columns/table_count 的表名通过 f-string 拼入 SQL，
+# 添加白名单校验防止 SQL 注入。项目中的表名均在此集合内。
+_ALLOWED_TABLE_NAMES = frozenset({
+    "plants", "process_areas", "process_lines",
+    "dosing_points", "sensor_tags", "sensor_samples", "manual_samples",
+    "recommendations", "recommendation_explanations",
+    "plc_devices", "plc_device_events",
+    "alarms", "audit_logs", "data_sources", "collector_runs",
+    "app_settings", "chemical_groups", "process_parameter_groups",
+    "model_projects", "model_training_samples",
+    "users", "user_sessions",
+})
+
+
+def _validate_table_name(table: str) -> None:
+    if table not in _ALLOWED_TABLE_NAMES:
+        raise ValueError(f"非法表名：{table!r}（不在白名单中）")
+
+
 def ensure_columns(con: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    _validate_table_name(table)
     existing = {row["name"] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
     for name, ddl in columns.items():
         if name not in existing:
@@ -835,6 +869,7 @@ def ensure_columns(con: sqlite3.Connection, table: str, columns: dict[str, str])
 
 
 def table_count(con: sqlite3.Connection, table: str) -> int:
+    _validate_table_name(table)
     return int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
@@ -881,9 +916,14 @@ def backup_database() -> Path:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     target = BACKUP_DIR / f"ai_pac_{stamp}.sqlite"
-    with get_connection() as source:
+    # P0-2 修复：sqlite3.Connection 的上下文管理器只负责提交/回滚，不会关闭连接，
+    # 因此 get_connection() 返回的连接若用 with 会导致连接泄漏。改为显式 close。
+    source = get_connection()
+    try:
         with sqlite3.connect(target) as dest:
             source.backup(dest)
+    finally:
+        source.close()
     return target
 
 

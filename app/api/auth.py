@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.services.auth import authenticate, change_password, get_user_by_token, revoke_token
@@ -28,7 +28,8 @@ def _token_from_request(request: Request) -> str | None:
 def login(body: LoginBody) -> dict[str, Any]:
     user = authenticate(body.username.strip(), body.password)
     if not user:
-        return {"detail": "用户名或密码错误"}
+        # P0-5 修复：统一使用 raise HTTPException，与其他模块错误返回方式保持一致
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
     return {"ok": True, "user": {"id": user["id"], "username": user["username"], "role": user["role"]}, "token": user["token"]}
 
 
@@ -54,10 +55,13 @@ def password(body: PasswordBody, request: Request) -> dict[str, Any]:
     token = _token_from_request(request)
     user = get_user_by_token(token)
     if not user:
-        return {"detail": "未登录"}
+        # P0-5 修复：统一使用 raise HTTPException
+        raise HTTPException(status_code=401, detail="未登录")
     if len(body.new_password) < 6:
-        return {"detail": "新密码至少6位"}
+        # P0-5 修复：统一使用 raise HTTPException
+        raise HTTPException(status_code=400, detail="新密码至少6位")
     result = change_password(user["id"], body.old_password, body.new_password)
     if not result["ok"]:
-        return {"detail": result["error"]}
+        # P0-5 修复：统一使用 raise HTTPException
+        raise HTTPException(status_code=400, detail=result["error"])
     return {"ok": True}

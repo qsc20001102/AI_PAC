@@ -132,6 +132,7 @@ async function renderPlc(main) {
   const config = PROTOCOL_CONFIGS[protocol];
 
   // 动态参数区域HTML
+  // P2-8 修复：将协议参数区域包裹在 id 容器中，协议切换时仅局部更新此区域，避免全量 innerHTML 重建。
   const protocolParamsHtml = config.params.map((param) => {
     if (param.type === "select") {
       return selectField(param.name, param.label, param.options, device ? device[param.name] : param.default);
@@ -165,7 +166,7 @@ async function renderPlc(main) {
               ${field("ip_address", "IP 地址", device.ip_address, "text")}
               ${field("port", "端口号", device.port ?? config.defaultPort)}
               ${field("timeout_ms", "接收超时 ms", device.timeout_ms ?? 5000)}
-              ${protocolParamsHtml}
+              <div id="protocolParamsContainer">${protocolParamsHtml}</div>
               ${selectField("enabled", "启用状态", [{ value: "true", label: "启用" }, { value: "false", label: "停用" }], String(Boolean(device.enabled)))}
               ${selectField("reconnect_enabled", "断线重连", [{ value: "true", label: "开启" }, { value: "false", label: "关闭" }], String(Boolean(device.reconnect_enabled)))}
               ${field("reconnect_interval_seconds", "重连间隔 (秒)", device.reconnect_interval_seconds ?? 10)}
@@ -183,7 +184,7 @@ async function renderPlc(main) {
                 <button id="connectPlcDeviceBtn" class="btn ghost" type="button" ${device.status === "connected" ? "disabled" : ""}>${icon("i-plc")}连接</button>
                 <button id="disconnectPlcDeviceBtn" class="btn" type="button" ${device.status !== "connected" ? "disabled" : ""}>断开</button>
               `}
-              <span class="muted">${protocolHint}</span>
+              <span id="protocolHint" class="muted">${protocolHint}</span>
             </div>
           </form>
         </div>
@@ -227,16 +228,38 @@ async function renderPlc(main) {
     await renderPage();
   }));
 
-  // 协议选择下拉框onchange事件：切换协议后重新渲染表单
+  // 协议选择下拉框onchange事件：切换协议后局部更新参数区域，避免全量 innerHTML 重建
+  // P2-8 修复：原代码调用 await renderPage() 重建整个页面，导致已输入的设备名/IP等字段值丢失。
+  // 改为仅更新协议参数容器、端口默认值和提示文本，保留其他字段的用户输入。
   const protocolSelect = document.querySelector("select[name='protocol']");
   if (protocolSelect) {
-    protocolSelect.addEventListener("change", async (event) => {
+    protocolSelect.addEventListener("change", (event) => {
       const newProtocol = event.target.value;
       state.newPlcDeviceProtocol = newProtocol;
-      // 如果是新建设备，需要更新端口号默认值
-      if (isNew) {
-        await renderPage();
+      const newConfig = PROTOCOL_CONFIGS[newProtocol];
+      if (!newConfig) return;
+      const paramsContainer = document.getElementById("protocolParamsContainer");
+      if (paramsContainer) {
+        paramsContainer.innerHTML = newConfig.params.map((param) => {
+          if (param.type === "select") {
+            return selectField(param.name, param.label, param.options, param.default);
+          } else {
+            return field(param.name, param.label, param.default, param.type);
+          }
+        }).join("");
       }
+      // 新建设备时更新端口默认值（仅当用户未手动修改过时）
+      if (isNew) {
+        const portInput = document.querySelector("input[name='port']");
+        if (portInput) {
+          const oldConfig = PROTOCOL_CONFIGS[protocol];
+          if (Number(portInput.value) === oldConfig.defaultPort) {
+            portInput.value = newConfig.defaultPort;
+          }
+        }
+      }
+      const hintEl = document.getElementById("protocolHint");
+      if (hintEl) hintEl.textContent = newConfig.hint;
     });
   }
 

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import sqlite3  # P0-4 修复：_forward_fill_grid 类型注解使用 sqlite3.Connection 但缺失导入
 from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
 from app.api.common import row_to_dict
-from app.database import db_session
-from app.database import utc_now_iso
+from app.database import db_session, utc_now, utc_now_iso
 from app.schemas import CollectionTagCreate, CollectionTagUpdate, HistoryPurgeIn
 from app.services.audit import audit
 from app.services.collection_runtime import (
@@ -95,53 +95,59 @@ def collection_config(dosing_point_id: int | None = None, scope: str | None = No
     }
 
 
-@router.post("/api/collection/public/tags")
-def create_public_collection_tag(payload: CollectionTagCreate) -> dict[str, Any]:
-    validate_collection_payload(payload)
+def _insert_collection_tag(con, payload: CollectionTagCreate, dosing_point_id: int | None) -> int:
+    """P2-4 修复：create_public_collection_tag 与 create_collection_tag 的插入逻辑 90%+ 重复，抽取公共函数。"""
     now = utc_now_iso()
     tag_type = payload.tag_type.strip().upper()
     if not all((char.isascii() and (char.isalnum() or char in "_-")) for char in tag_type):
         raise HTTPException(422, "采集类型只能包含字母、数字、下划线和中划线")
+    existing = con.execute("SELECT id FROM sensor_tags WHERE tag_code=?", (payload.tag_code.strip(),)).fetchone()
+    if existing:
+        raise HTTPException(409, "采集点名称已存在，必须全系统唯一")
+    if payload.plc_device_id is not None:
+        device = con.execute("SELECT id FROM plc_devices WHERE id=?", (payload.plc_device_id,)).fetchone()
+        if not device:
+            raise HTTPException(422, "数据源 PLC 设备不存在")
+    cur = con.execute(
+        """
+        INSERT INTO sensor_tags(
+            dosing_point_id,tag_code,tag_type,name,unit,stale_minutes,max_stale_minutes,
+            min_value,max_value,source,enabled,data_type,plc_device_id,data_address,
+            poll_interval_seconds,history_enabled,history_interval_minutes,last_quality,last_read_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            dosing_point_id,
+            payload.tag_code.strip(),
+            tag_type,
+            payload.tag_code.strip(),
+            payload.unit.strip(),
+            max(payload.poll_interval_seconds * 2, 1),
+            max(payload.poll_interval_seconds * 12, 15),
+            None,
+            None,
+            "s7comm",
+            int(payload.enabled),
+            payload.data_type.upper(),
+            payload.plc_device_id,
+            payload.data_address.strip().upper(),
+            payload.poll_interval_seconds,
+            int(payload.history_enabled),
+            payload.history_interval_minutes,
+            "unknown",
+            now,
+        ),
+    )
+    tag_id = int(cur.lastrowid)
+    audit(con, "local", "create", "collection_tag", str(tag_id), payload.model_dump() | {"dosing_point_id": dosing_point_id})
+    return tag_id
+
+
+@router.post("/api/collection/public/tags")
+def create_public_collection_tag(payload: CollectionTagCreate) -> dict[str, Any]:
+    validate_collection_payload(payload)
     with db_session() as con:
-        existing = con.execute("SELECT id FROM sensor_tags WHERE tag_code=?", (payload.tag_code.strip(),)).fetchone()
-        if existing:
-            raise HTTPException(409, "采集点名称已存在，必须全系统唯一")
-        if payload.plc_device_id is not None:
-            device = con.execute("SELECT id FROM plc_devices WHERE id=?", (payload.plc_device_id,)).fetchone()
-            if not device:
-                raise HTTPException(422, "数据源 PLC 设备不存在")
-        cur = con.execute(
-            """
-            INSERT INTO sensor_tags(
-                dosing_point_id,tag_code,tag_type,name,unit,stale_minutes,max_stale_minutes,
-                min_value,max_value,source,enabled,data_type,plc_device_id,data_address,
-                poll_interval_seconds,history_enabled,history_interval_minutes,last_quality,last_read_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                None,
-                payload.tag_code.strip(),
-                tag_type,
-                payload.tag_code.strip(),
-                payload.unit.strip(),
-                max(payload.poll_interval_seconds * 2, 1),
-                max(payload.poll_interval_seconds * 12, 15),
-                None,
-                None,
-                "s7comm",
-                int(payload.enabled),
-                payload.data_type.upper(),
-                payload.plc_device_id,
-                payload.data_address.strip().upper(),
-                payload.poll_interval_seconds,
-                int(payload.history_enabled),
-                payload.history_interval_minutes,
-                "unknown",
-                now,
-            ),
-        )
-        tag_id = int(cur.lastrowid)
-        audit(con, "local", "create", "collection_tag", str(tag_id), payload.model_dump() | {"dosing_point_id": None})
+        tag_id = _insert_collection_tag(con, payload, None)
         created = collection_tag_row(con, tag_id)
     return {"ok": True, "id": tag_id, "tag": created}
 
@@ -149,53 +155,11 @@ def create_public_collection_tag(payload: CollectionTagCreate) -> dict[str, Any]
 @router.post("/api/collection/points/{point_id}/tags")
 def create_collection_tag(point_id: int, payload: CollectionTagCreate) -> dict[str, Any]:
     validate_collection_payload(payload)
-    now = utc_now_iso()
-    tag_type = payload.tag_type.strip().upper()
-    if not all((char.isascii() and (char.isalnum() or char in "_-")) for char in tag_type):
-        raise HTTPException(422, "采集类型只能包含字母、数字、下划线和中划线")
     with db_session() as con:
         point = con.execute("SELECT * FROM dosing_points WHERE id=?", (point_id,)).fetchone()
         if not point:
             raise HTTPException(404, "投加点不存在")
-        existing = con.execute("SELECT id FROM sensor_tags WHERE tag_code=?", (payload.tag_code.strip(),)).fetchone()
-        if existing:
-            raise HTTPException(409, "采集点名称已存在，必须全系统唯一")
-        if payload.plc_device_id is not None:
-            device = con.execute("SELECT id FROM plc_devices WHERE id=?", (payload.plc_device_id,)).fetchone()
-            if not device:
-                raise HTTPException(422, "数据源 PLC 设备不存在")
-        cur = con.execute(
-            """
-            INSERT INTO sensor_tags(
-                dosing_point_id,tag_code,tag_type,name,unit,stale_minutes,max_stale_minutes,
-                min_value,max_value,source,enabled,data_type,plc_device_id,data_address,
-                poll_interval_seconds,history_enabled,history_interval_minutes,last_quality,last_read_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                point_id,
-                payload.tag_code.strip(),
-                tag_type,
-                payload.tag_code.strip(),
-                payload.unit.strip(),
-                max(payload.poll_interval_seconds * 2, 1),
-                max(payload.poll_interval_seconds * 12, 15),
-                None,
-                None,
-                "s7comm",
-                int(payload.enabled),
-                payload.data_type.upper(),
-                payload.plc_device_id,
-                payload.data_address.strip().upper(),
-                payload.poll_interval_seconds,
-                int(payload.history_enabled),
-                payload.history_interval_minutes,
-                "unknown",
-                now,
-            ),
-        )
-        tag_id = int(cur.lastrowid)
-        audit(con, "local", "create", "collection_tag", str(tag_id), payload.model_dump() | {"dosing_point_id": point_id})
+        tag_id = _insert_collection_tag(con, payload, point_id)
         created = collection_tag_row(con, tag_id)
     return {"ok": True, "id": tag_id, "tag": created}
 
@@ -339,8 +303,8 @@ def history_data(
     ids = sorted({int(item) for item in tag_ids.split(",") if item.strip().isdigit()})
     if not ids:
         return {"series": []}
-    start = start_time or (datetime.now() - timedelta(days=1)).isoformat()
-    end = end_time or datetime.now().isoformat()
+    start = start_time or (utc_now() - timedelta(days=1)).isoformat()  # P1-1: 统一 UTC
+    end = end_time or utc_now().isoformat()
     grid: list[datetime] | None = None
     if interval_minutes is not None:
         try:
@@ -388,7 +352,7 @@ def history_data(
 
 @router.post("/api/history-data/purge")
 def purge_history_data(payload: HistoryPurgeIn) -> dict[str, Any]:
-    cutoff = (datetime.now() - timedelta(days=payload.days)).replace(microsecond=0).isoformat()
+    cutoff = (utc_now() - timedelta(days=payload.days)).replace(microsecond=0).isoformat()  # P1-1: 统一 UTC
     with db_session() as con:
         sensor_count = int(con.execute("SELECT COUNT(*) FROM sensor_samples WHERE sample_time<?", (cutoff,)).fetchone()[0])
         con.execute("DELETE FROM sensor_samples WHERE sample_time<?", (cutoff,))

@@ -39,6 +39,54 @@ def plc_device_rows(con) -> list[dict[str, Any]]:
     return result
 
 
+def _connect_and_record(con, device, event_type: str, success_message: str) -> tuple[bool, Any | None]:
+    """P2-5 修复：ensure_plc_runtime_client 与 auto_connect_enabled_plc_devices 的连接+DB更新+日志逻辑重复，抽取公共方法。
+    返回 (ok, client)。调用方需保证 device["protocol"] 已校验为 s7_1500 或 modbus_tcp。"""
+    protocol = device["protocol"]
+    if protocol == "s7_1500":
+        result = connect_s7_1500(
+            ip_address=device["ip_address"],
+            port=int(device["port"]),
+            rack=int(device["rack"]),
+            slot=int(device["slot"]),
+            timeout_ms=int(device["timeout_ms"]),
+        )
+    elif protocol == "modbus_tcp":
+        result = connect_modbus_tcp(
+            ip_address=device["ip_address"],
+            port=int(device["port"]),
+            timeout_ms=int(device["timeout_ms"]),
+        )
+    else:
+        return False, None
+
+    now = utc_now_iso()
+    device_id = int(device["id"])
+    if result.ok and result.client is not None:
+        pdu_length = getattr(result, "pdu_length", None)
+        con.execute(
+            """
+            UPDATE plc_devices
+            SET status='connected', pdu_length=?, last_connected_at=?, last_error=NULL, updated_at=?
+            WHERE id=?
+            """,
+            (pdu_length, now, now, device_id),
+        )
+        log_plc_device_event(con, device_id, event_type, "connected", success_message, pdu_length)
+        return True, result.client
+
+    con.execute(
+        """
+        UPDATE plc_devices
+        SET status='error', pdu_length=NULL, last_error=?, updated_at=?
+        WHERE id=?
+        """,
+        (result.message, now, device_id),
+    )
+    log_plc_device_event(con, device_id, event_type, "error", result.message)
+    return False, None
+
+
 def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
     clients = plc_client_store()
     client = clients.get(device_id)
@@ -80,49 +128,12 @@ def ensure_plc_runtime_client(con, device_id: int) -> Any | None:
 
     _last_reconnect_attempt[device_id] = time.monotonic()
 
-    # 根据协议分发连接逻辑
-    if protocol == "s7_1500":
-        result = connect_s7_1500(
-            ip_address=device["ip_address"],
-            port=int(device["port"]),
-            rack=int(device["rack"]),
-            slot=int(device["slot"]),
-            timeout_ms=int(device["timeout_ms"]),
-        )
-    elif protocol == "modbus_tcp":
-        result = connect_modbus_tcp(
-            ip_address=device["ip_address"],
-            port=int(device["port"]),
-            timeout_ms=int(device["timeout_ms"]),
-        )
-    else:
-        return None
-
-    now = utc_now_iso()
-    if result.ok and result.client is not None:
-        clients[device_id] = result.client
+    # P2-5 修复：连接+DB更新+日志逻辑抽取到 _connect_and_record。
+    ok, client = _connect_and_record(con, device, "reconnect", "断线重连成功，PLC 连接已恢复")
+    if ok:
+        clients[device_id] = client
         _last_reconnect_attempt.pop(device_id, None)
-        pdu_length = getattr(result, "pdu_length", None) if hasattr(result, "pdu_length") else None
-        con.execute(
-            """
-            UPDATE plc_devices
-            SET status='connected', pdu_length=?, last_connected_at=?, last_error=NULL, updated_at=?
-            WHERE id=?
-            """,
-            (pdu_length, now, now, device_id),
-        )
-        log_plc_device_event(con, device_id, "reconnect", "connected", "断线重连成功，PLC 连接已恢复", pdu_length)
-        return result.client
-
-    con.execute(
-        """
-        UPDATE plc_devices
-        SET status='error', pdu_length=NULL, last_error=?, updated_at=?
-        WHERE id=?
-        """,
-        (result.message, now, device_id),
-    )
-    log_plc_device_event(con, device_id, "reconnect", "error", result.message)
+        return client
     return None
 
 
@@ -141,51 +152,13 @@ def auto_connect_enabled_plc_devices(con) -> dict[str, int]:
             disconnect_plc_client(old_client, device_id)
         summary["attempted"] += 1
 
-        # 根据协议分发连接逻辑
-        if protocol == "s7_1500":
-            result = connect_s7_1500(
-                ip_address=device["ip_address"],
-                port=int(device["port"]),
-                rack=int(device["rack"]),
-                slot=int(device["slot"]),
-                timeout_ms=int(device["timeout_ms"]),
-            )
-        elif protocol == "modbus_tcp":
-            result = connect_modbus_tcp(
-                ip_address=device["ip_address"],
-                port=int(device["port"]),
-                timeout_ms=int(device["timeout_ms"]),
-            )
-        else:
-            summary["skipped"] += 1
-            continue
-
-        now = utc_now_iso()
-        if result.ok and result.client is not None:
-            clients[device_id] = result.client
-            pdu_length = getattr(result, "pdu_length", None) if hasattr(result, "pdu_length") else None
-            con.execute(
-                """
-                UPDATE plc_devices
-                SET status='connected', pdu_length=?, last_connected_at=?, last_error=NULL, updated_at=?
-                WHERE id=?
-                """,
-                (pdu_length, now, now, device_id),
-            )
-            log_plc_device_event(con, device_id, "auto_connect", "connected", "项目启动自动连接 PLC 成功", pdu_length)
+        # P2-5 修复：连接+DB更新+日志逻辑抽取到 _connect_and_record。
+        ok, client = _connect_and_record(con, device, "auto_connect", "项目启动自动连接 PLC 成功")
+        if ok:
+            clients[device_id] = client
             summary["connected"] += 1
-            continue
-
-        con.execute(
-            """
-            UPDATE plc_devices
-            SET status='error', pdu_length=NULL, last_error=?, updated_at=?
-            WHERE id=?
-            """,
-            (result.message, now, device_id),
-        )
-        log_plc_device_event(con, device_id, "auto_connect", "error", result.message)
-        summary["failed"] += 1
+        else:
+            summary["failed"] += 1
     return summary
 
 

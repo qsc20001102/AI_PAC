@@ -49,7 +49,8 @@ def backend_status() -> dict[str, Any]:
         sources = con.execute("SELECT * FROM data_sources ORDER BY id").fetchall()
         journal = con.execute("PRAGMA journal_mode").fetchone()[0]
     return {
-        "database": {"path": str(DB_PATH), "journal_mode": journal, "exists": DB_PATH.exists()},
+        # P0-6 修复：移除 DB_PATH，避免泄露服务器文件系统路径，仅返回文件名与是否存在
+        "database": {"file_name": DB_PATH.name, "journal_mode": journal, "exists": DB_PATH.exists()},
         "table_counts": counts,
         "data_sources": [row_to_dict(row) for row in sources],
         "latest_samples": [row_to_dict(row) for row in latest],

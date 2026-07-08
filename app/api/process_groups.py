@@ -66,6 +66,14 @@ def validate_process_parameter_group_payload(payload: ProcessParameterGroupIn) -
 
 
 def process_parameter_group_values(payload: ProcessParameterGroupIn) -> tuple[Any, ...]:
+    # P3-10 修复：原代码使用裸魔法数字，含义不明。改为命名常量并添加注释。
+    DEFAULT_BIO_PHOSPHORUS_EFFICIENCY = 0.7   # 生化除磷效率默认 70%
+    DEFAULT_INFLOW_DELAY_MINUTES = 0           # 进水延迟分钟数，默认无延迟
+    DEFAULT_LAG_MINUTES = 0                    # 滞后分钟数，默认无滞后
+    DEFAULT_FEEDBACK_KP = 0.0                  # 反馈比例增益，默认关闭（0=不启用反馈调节）
+    DEFAULT_FEEDBACK_MIN = 1.0                 # 反馈乘数下限，默认 1.0（不衰减）
+    DEFAULT_FEEDBACK_MAX = 1.0                 # 反馈乘数上限，默认 1.0（不放大）
+    DEFAULT_FEEDBACK_WINDOW_MINUTES = 60       # 反馈计算窗口，默认 60 分钟
     return (
         payload.name.strip(),
         payload.tp_target_mg_l,
@@ -76,13 +84,13 @@ def process_parameter_group_values(payload: ProcessParameterGroupIn) -> tuple[An
         payload.pac_min_l_h,
         payload.pac_max_l_h,
         payload.calculation_interval_seconds,
-        0.7,
-        0,
-        0,
-        0.0,
-        1.0,
-        1.0,
-        60,
+        DEFAULT_BIO_PHOSPHORUS_EFFICIENCY,
+        DEFAULT_INFLOW_DELAY_MINUTES,
+        DEFAULT_LAG_MINUTES,
+        DEFAULT_FEEDBACK_KP,
+        DEFAULT_FEEDBACK_MIN,
+        DEFAULT_FEEDBACK_MAX,
+        DEFAULT_FEEDBACK_WINDOW_MINUTES,
         payload.tp_forecast_coefficient,
         payload.pac_flow_coefficient,
         utc_now_iso(),
