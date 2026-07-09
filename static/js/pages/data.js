@@ -508,7 +508,8 @@ function exportHistoryTableCsv() {
 
 async function renderTrends(main) {
   ensureHistoryRange();
-  const tree = await api("/api/collection");
+  // 历史数据查询需要包含虚拟点(PREDICT_TP/RECOMMEND_PAC)，数据采集页面不需要
+  const tree = await api("/api/collection?include_computed=true");
   const allTagIds = new Set((tree.tags || []).map((tag) => tag.id));
   state.historySelectedTagIds = state.historySelectedTagIds.filter((id) => allTagIds.has(Number(id)));
   const history = await loadHistoryData();

@@ -210,8 +210,10 @@ def latest_data_for_point(con: sqlite3.Connection, dosing_point_id: int, now: da
         tag = tag_rows.get(tag_id)
         if not tag:
             continue
+        # 优先使用实时值 last_value_text（采集循环每次都会更新），而非历史样本表
+        # （历史样本按 history_interval_minutes 写入，间隔较大，在线计算时会因 age > stale_minutes 误判为 stale）
         realtime_sample: dict[str, Any] | None = None
-        if now_iso is None and tag["last_value_text"] is not None and tag["last_read_at"] is not None:
+        if tag["last_value_text"] is not None and tag["last_read_at"] is not None:
             try:
                 realtime_sample = {
                     "value": float(tag["last_value_text"]),
@@ -973,8 +975,9 @@ def write_virtual_point_samples(
     point = con.execute("SELECT code FROM dosing_points WHERE id=?", (dosing_point_id,)).fetchone()
     if not point:
         return
-    from app.api.dosing_points import ensure_virtual_point_tags
-    ensure_virtual_point_tags(con, dosing_point_id, point["code"])
+    # 不再调用 ensure_virtual_point_tags 自动重建虚拟采集点。
+    # 这两个 tag 由 create_default_point_tags 在创建投加点时建立，用户在数据采集页面删除后应尊重该操作，
+    # 而非每次推荐计算都强制恢复。tag 不存在时直接跳过历史样本写入。
     tags = {
         row["tag_type"]: row
         for row in con.execute(

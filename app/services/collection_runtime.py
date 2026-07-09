@@ -88,7 +88,7 @@ def collection_due_rows(
     public_only: bool = False,
     force: bool = False,
 ) -> list[Any]:
-    where = "WHERE st.enabled=1"
+    where = "WHERE st.enabled=1 AND st.source<>'computed'"
     params: list[Any] = []
     if not force:
         where += " AND st.plc_device_id IS NOT NULL AND st.data_address<>''"

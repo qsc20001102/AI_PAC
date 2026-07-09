@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -31,14 +31,15 @@ DEFAULT_UNIT_DOSE_CURVE = [
 
 
 def utc_now() -> datetime:
-    # P0-1/P1-1 修复：统一使用 naive UTC 时间。
-    # 采用 naive 而非 aware 是为了与历史数据库中的 naive ISO 字符串保持格式一致，
-    # 避免 aware/naive 混用导致的 TypeError 及 SQL 字符串比较错乱。
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    # 本项目为单机部署的工业控制系统，固定在北京时区运行，不存在跨时区需求。
+    # 此前 P0-1/P1-1 阶段曾改为 UTC，但导致 API 返回的时间字符串无时区标识，
+    # 前端 new Date() 按本地时间解析后显示比实际慢 8 小时，且与历史数据查询基准不一致。
+    # 现回退为本地时间（naive），与数据库历史数据格式保持一致。
+    return datetime.now()
 
 
 def utc_now_iso() -> str:
-    # P0-1 修复：使用 UTC 时间，避免本地时区导致部署到不同时区时时间语义混乱
+    # 函数名保留 utc_now_iso 以避免大范围重命名（已有多处调用），实际返回本地时间
     return utc_now().replace(microsecond=0).isoformat()
 
 

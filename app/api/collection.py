@@ -51,16 +51,22 @@ def latest_samples(dosing_point_id: int | None = None) -> list[dict[str, Any]]:
 
 
 @router.get("/api/collection")
-def collection_config(dosing_point_id: int | None = None, scope: str | None = None) -> dict[str, Any]:
+def collection_config(
+    dosing_point_id: int | None = None,
+    scope: str | None = None,
+    include_computed: bool = False,
+) -> dict[str, Any]:
     with db_session() as con:
         points = [row_to_dict(row) for row in con.execute("SELECT * FROM dosing_points ORDER BY display_order").fetchall()]
         devices = plc_device_rows(con)
-        where = ""
+        # 数据采集页面不传 include_computed，默认排除虚拟点；
+        # 历史数据查询页面传 include_computed=true，返回包含虚拟点(PREDICT_TP/RECOMMEND_PAC)的完整列表
+        where = "WHERE 1=1" if include_computed else "WHERE st.source<>'computed'"
         params: list[Any] = []
         if scope == "public":
-            where = "WHERE st.dosing_point_id IS NULL"
+            where += " AND st.dosing_point_id IS NULL"
         elif dosing_point_id is not None:
-            where = "WHERE st.dosing_point_id=?"
+            where += " AND st.dosing_point_id=?"
             params.append(dosing_point_id)
         tags = [
             row_to_dict(row)

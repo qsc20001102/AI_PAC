@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from app.database import db_session
+from app.database import db_session, utc_now
 from app.services.recommendation import PROCESS_SOURCE_MAP
 
 
@@ -18,7 +18,7 @@ def trends(
     dosing_point_id: int = Query(1, ge=1),
     hours: int = Query(6, ge=1, le=720),
 ) -> dict[str, Any]:
-    since = (datetime.now() - timedelta(hours=hours)).isoformat()
+    since = (utc_now() - timedelta(hours=hours)).isoformat()
     with db_session() as con:
         point = con.execute(
             "SELECT * FROM dosing_points WHERE id=?",
@@ -47,6 +47,13 @@ def trends(
             for tag in legacy_tags:
                 if tag["tag_type"] in {"Q", "TP_BEFORE", "TP_OUT", "PH", "PAC_ACTUAL"}:
                     tags.append((tag, tag["tag_type"], tag["tag_code"], tag["unit"]))
+        # 虚拟点（系统计算结果）历史数据：无论是否配置源标签，都应展示
+        virtual_tags = con.execute(
+            "SELECT id, tag_type, tag_code, name, unit FROM sensor_tags WHERE dosing_point_id=? AND tag_type IN ('PREDICT_TP','RECOMMEND_PAC')",
+            (dosing_point_id,),
+        ).fetchall()
+        for tag in virtual_tags:
+            tags.append((tag, tag["tag_type"], tag["tag_code"], tag["unit"]))
         for tag, logical_type, logical_name, default_unit in tags:
             rows = con.execute(
                 """
@@ -101,7 +108,7 @@ def savings(
     start: str | None = Query(None),
     end: str | None = Query(None),
 ) -> dict[str, Any]:
-    now = datetime.now()
+    now = utc_now()
     end_dt = datetime.fromisoformat(end) if end else now
     start_dt = datetime.fromisoformat(start) if start else (end_dt - timedelta(hours=3))
     start_iso = start_dt.isoformat()
