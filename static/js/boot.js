@@ -102,7 +102,10 @@ function renderNav() {
   `).join("");
   document.querySelectorAll(".nav-button").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      state.activePage = btn.dataset.page;
+      const page = btn.dataset.page;
+      state.activePage = page;
+      // 同步更新浏览器地址栏 hash，使用 pushState 避免触发 hashchange 导致重复渲染
+      try { history.pushState(null, "", "#" + page); } catch (_) {}
       renderNav();
       await renderPage();
     });
